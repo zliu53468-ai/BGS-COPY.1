@@ -138,6 +138,22 @@ class GroupOCRTests(unittest.TestCase):
             waiting_image, self.screen(["B", "P", "T", "B"])))
         self.assertEqual(self.state()["history"], [])
 
+    def test_end_analysis_clears_snapshot_and_discards_inflight_image(self):
+        self.start()
+        first = self.claim(self.image())
+        self.done(first, self.screen(["B", "P", "T"]))
+        self.assertEqual(self.state()["history"], ["B", "P", "T"])
+        pending = self.claim(self.image())
+        done = handle_group_event(
+            self.event("結束分析"), environ=self.env, state_path=self.path)
+        self.assertIn("已清空", done)
+        self.assertFalse(self.state()["active"])
+        self.assertEqual(self.state()["history"], [])
+        self.assertEqual(self.state()["records"], [])
+        self.assertIn("已忽略舊結果",
+                      self.done(pending, self.screen(["B", "P", "T", "B"])))
+        self.assertEqual(self.state()["history"], [])
+
     def test_wrong_wager_gate_is_rejected_and_not_persisted(self):
         self.start()
         claim = self.claim(self.image())
