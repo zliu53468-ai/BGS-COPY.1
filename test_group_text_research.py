@@ -206,10 +206,77 @@ class GroupTextResearchTests(unittest.TestCase):
         self.assertEqual(self.state("C-group-2")["net_units"], 0)
         self.assertEqual(self.state()["history"], ["B"])
         self.assertEqual(self.state("C-group-2")["history"], ["P"])
-        self.assertIn("已結束", self.call("結束分析"))
+        self.assertIn("牌路、模擬注數", self.call("結束分析"))
         self.assertFalse(self.state()["active"])
         self.assertIn("開始分析", self.call("紅"))
-        self.assertEqual(self.state()["history"], ["B"])
+        self.assertEqual(self.state()["history"], [])
+        self.assertEqual(self.state()["net_units"], 0)
+        self.assertEqual(self.state()["records"], [])
+        # Another LINE group is unaffected by this group's reset.
+        self.assertEqual(self.state("C-group-2")["history"], ["P"])
+
+    def test_end_clears_road_ledger_tier_pause_and_rotates_run_id(self):
+        self.call("開始分析")
+        before = self.state()["run_id"]
+        self.call("紅")
+        self.call("-20")
+        self.call("休息")
+        state = self.state()
+        self.assertEqual(state["history"], ["B"])
+        self.assertTrue(state["paused"])
+        self.assertEqual(state["net_units"], -20)
+        self.assertEqual(len(state["records"]), 1)
+        message = self.call("結束分析")
+        self.assertIn("已清空", message)
+        state = self.state()
+        self.assertFalse(state["active"])
+        self.assertFalse(state["paused"])
+        self.assertEqual(state["history"], [])
+        self.assertEqual(state["net_units"], 0)
+        self.assertEqual(state["pending_tier"], 0)
+        self.assertEqual(state["records"], [])
+        self.assertEqual(state["last_research_direction"], "SKIP")
+        self.assertNotEqual(state["run_id"], before)
+        self.assertIn("已記錄牌局：0 局", self.call("查詢狀態"))
+        self.assertIn("開始分析", self.call("紅"))
+        self.call("開始分析")
+        self.assertEqual(self.state()["history"], [])
+        self.assertTrue(self.state()["active"])
+
+    def test_eligible_research_direction_survives_zero_kelly_tier(self):
+        def low_tier(hist):
+            report = self.predictor(hist)
+            report["probabilities"] = {"B": .51, "P": .48, "T": .01}
+            return report
+        self.call("開始分析")
+        msg = handle_group_event(
+            self.event("紅"), environ=self.env,
+            predictor=low_tier, state_path=self.path)
+        self.assertIn("下一局研究：🔴 莊｜0 注", msg)
+        self.assertNotIn("下一局研究：⚪ 觀望", msg)
+        self.assertIn("模擬 Kelly 級距不足 5 注", msg)
+        self.assertIn("正式決策：Skip／0 注", msg)
+        self.assertEqual(self.state()["last_research_direction"], "B")
+        self.assertEqual(self.state()["pending_tier"], 0)
+
+    def test_actual_research_skip_keeps_skip_and_explains_causes(self):
+        def uncertain(hist):
+            report = self.predictor(hist)
+            report["research_view"].update({
+                "direction": "SKIP",
+                "eligible": False,
+                "candidate": "B",
+                "reasons": ["weak_ev_separation", "low_gap_to_noise"],
+            })
+            return report
+        self.call("開始分析")
+        msg = handle_group_event(
+            self.event("紅"), environ=self.env,
+            predictor=uncertain, state_path=self.path)
+        self.assertIn("下一局研究：⚪ 觀望｜0 注", msg)
+        self.assertIn("觀望原因：莊閒估計 EV 差距不足、方向差距低於抽樣噪音", msg)
+        self.assertIn("模型候選：🔴 莊（未通過研究門檻", msg)
+        self.assertEqual(self.state()["last_research_direction"], "SKIP")
 
     def test_max_history_never_silently_truncated(self):
         self.call("開始分析")
