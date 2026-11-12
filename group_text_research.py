@@ -21,7 +21,7 @@ from bbb_soft_shoe_runtime import MAX_HANDS, VERSION, analyze_history
 _LOCK = threading.RLock()
 RESULTS = {"紅": "B", "藍": "P", "和": "T",
            "莊": "B", "閒": "P", "和局": "T"}
-SIDE_LABEL = {"B": "🔴 莊", "P": "🔵 閒", "SKIP": "⚪ 觀望"}
+SIDE_LABEL = {"B": "🔴 莊", "P": "🔵 閒", "T": "🟢 和", "SKIP": "⚪ 觀望"}
 ALLOWED_UNITS = (5, 10, 20)
 MAX_EVENTS = 200
 
