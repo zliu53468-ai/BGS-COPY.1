@@ -1,0 +1,952 @@
+"""百家樂大路圖片辨識模組 V10.9（保守完整反推版）。
+
+改良重點：
+1. 先以幾何輪廓定位圓圈，再以「外框環形區域」判定紅莊／藍閒。
+2. 空心圓、中心數字與白色圓心不再直接造成顏色判定失敗。
+3. 支援直接傳入 OpenCV ndarray，避免路紙裁圖寫入暫存檔的磁碟延遲。
+4. 圖片會先限制分析尺寸，再進行輪廓與局部顏色運算。
+"""
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Sequence, Tuple
+import math
+import os
+import time
+
+import cv2
+import numpy as np
+
+from image_normalize import normalize_capture
+
+
+def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(str(os.getenv(name, default)).strip())
+    except Exception:
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+def _env_float(name: str, default: float, minimum: float, maximum: float) -> float:
+    try:
+        value = float(str(os.getenv(name, default)).strip())
+    except Exception:
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+MAX_IMAGE_SIDE = _env_int("VISION_MAX_IMAGE_SIDE", 1400, 800, 2000)
+ADAPTIVE_BLOCK_SIZE = _env_int("VISION_ADAPTIVE_BLOCK_SIZE", 31, 11, 101)
+if ADAPTIVE_BLOCK_SIZE % 2 == 0:
+    ADAPTIVE_BLOCK_SIZE += 1
+ADAPTIVE_C = _env_int("VISION_ADAPTIVE_C", 7, -30, 30)
+MIN_CIRCLE_AREA = _env_float("VISION_MIN_CIRCLE_AREA", 12.0, 6.0, 5000.0)
+MAX_CIRCLE_AREA_RATIO = _env_float("VISION_MAX_CIRCLE_AREA_RATIO", 0.025, 0.001, 0.20)
+MIN_CIRCULARITY = _env_float("VISION_MIN_CIRCULARITY", 0.24, 0.05, 0.95)
+MIN_SATURATION = _env_float("VISION_MIN_SATURATION", 24.0, 12.0, 255.0)
+CENTER_PATCH_RADIUS = _env_int("VISION_CENTER_PATCH_RADIUS", 2, 1, 8)
+RING_INNER_RATIO = _env_float("VISION_RING_INNER_RATIO", 0.22, 0.08, 0.42)
+RING_OUTER_RATIO = _env_float("VISION_RING_OUTER_RATIO", 0.52, 0.30, 0.78)
+RING_MIN_COLOR_RATIO = _env_float("VISION_RING_MIN_COLOR_RATIO", 0.065, 0.02, 0.60)
+COLUMN_TOLERANCE_RATIO = _env_float("VISION_COLUMN_TOLERANCE_RATIO", 0.62, 0.25, 1.50)
+MAX_UNKNOWN_RATIO = _env_float("VISION_MAX_UNKNOWN_RATIO", 0.18, 0.0, 0.80)
+MIN_RECOGNIZED_FOR_PREDICTION = _env_int("VISION_MIN_RECOGNIZED", 8, 1, 200)
+ADAPTIVE_COLOR = os.getenv("VISION_ADAPTIVE_COLOR", "1").strip() == "1"
+VISION_LIGHT_ENHANCE = os.getenv("VISION_LIGHT_ENHANCE", "1").strip() == "1"
+VISION_SCALE_RETRY_ENABLED = os.getenv("VISION_SCALE_RETRY_ENABLED", "1").strip() == "1"
+VISION_MAX_SCALES = _env_int("VISION_MAX_SCALES", 2, 1, 2)
+VISION_SCALE_RETRY_MIN_CANDIDATES = _env_int(
+    "VISION_SCALE_RETRY_MIN_CANDIDATES", 6, 1, 80
+)
+VISION_MAX_RAW_CONTOURS = _env_int("VISION_MAX_RAW_CONTOURS", 800, 100, 1200)
+VISION_MAX_CIRCLE_CANDIDATES = _env_int(
+    "VISION_MAX_CIRCLE_CANDIDATES", 200, 20, 300
+)
+VISION_RECONSTRUCT_MAX_NODES = _env_int(
+    "VISION_RECONSTRUCT_MAX_NODES", 12000, 1000, 50000
+)
+VISION_RECONSTRUCT_MAX_SECONDS = _env_float(
+    "VISION_RECONSTRUCT_MAX_SECONDS", 0.10, 0.01, 0.40
+)
+VISION_DARK_ROAD_COLOR_GEOMETRY = (
+    os.getenv("VISION_DARK_ROAD_COLOR_GEOMETRY", "1").strip() == "1"
+)
+VISION_DARK_ROAD_MAX_VALUE = _env_float(
+    "VISION_DARK_ROAD_MAX_VALUE", 175.0, 60.0, 230.0
+)
+VISION_DARK_COLOR_VALUE_FLOOR = _env_float(
+    "VISION_DARK_COLOR_VALUE_FLOOR", 120.0, 40.0, 245.0
+)
+VISION_DARK_COLOR_VALUE_DELTA = _env_float(
+    "VISION_DARK_COLOR_VALUE_DELTA", 20.0, 4.0, 100.0
+)
+VISION_DARK_RING_INNER_RATIO = _env_float(
+    "VISION_DARK_RING_INNER_RATIO", 0.70, 0.35, 0.90
+)
+VISION_DARK_RING_OUTER_RATIO = _env_float(
+    "VISION_DARK_RING_OUTER_RATIO", 1.05, 0.75, 1.20
+)
+
+
+@dataclass(frozen=True)
+class CircleCandidate:
+    x: int
+    y: int
+    width: int
+    height: int
+    area: float
+    circularity: float
+    fill_ratio: float
+    outcome: str = ""
+    hue: float = 0.0
+    saturation: float = 0.0
+    value: float = 0.0
+    red_ratio: float = 0.0
+    blue_ratio: float = 0.0
+    color_method: str = ""
+
+    @property
+    def diameter(self) -> float:
+        return (float(self.width) + float(self.height)) / 2.0
+
+
+def _vision_deadline_guard(
+    deadline: float | None = None,
+    cancel_event: object | None = None,
+    *,
+    min_remaining: float = 0.0,
+) -> None:
+    if cancel_event is not None and bool(getattr(cancel_event, "is_set", lambda: False)()):
+        raise TimeoutError("圓環辨識已取消。")
+    if deadline is not None and float(deadline) - time.perf_counter() <= float(min_remaining):
+        raise TimeoutError("圓環辨識已達硬截止。")
+
+
+def _read_image(path: str | Path) -> np.ndarray:
+    image, meta = normalize_capture(
+        path, max_side=MAX_IMAGE_SIDE, enhance=VISION_LIGHT_ENHANCE
+    )
+    if image is None:
+        raise ValueError(str(meta.get("error") or "無法讀取路紙圖片。"))
+    return image
+
+
+def _resize_for_analysis(
+    image: np.ndarray,
+    *,
+    deadline: float | None = None,
+    cancel_event: object | None = None,
+) -> Tuple[np.ndarray, float, Dict[str, Any]]:
+    normalized, meta = normalize_capture(
+        image,
+        max_side=MAX_IMAGE_SIDE,
+        enhance=VISION_LIGHT_ENHANCE,
+        deadline=deadline,
+        cancel_event=cancel_event,
+    )
+    if normalized is None:
+        raise ValueError(str(meta.get("error") or "無法正規化路紙圖片。"))
+    return normalized, float(meta.get("scale", 1.0) or 1.0), dict(meta)
+
+
+def _circular_hsv_mean(patch_hsv: np.ndarray) -> Tuple[float, float, float]:
+    pixels = patch_hsv.reshape(-1, 3).astype(np.float64)
+    if pixels.size == 0:
+        return 0.0, 0.0, 0.0
+    hues = pixels[:, 0]
+    saturation = float(np.mean(pixels[:, 1]))
+    value = float(np.mean(pixels[:, 2]))
+    angles = hues / 180.0 * 2.0 * math.pi
+    angle = math.atan2(float(np.mean(np.sin(angles))), float(np.mean(np.cos(angles))))
+    if angle < 0:
+        angle += 2.0 * math.pi
+    return angle / (2.0 * math.pi) * 180.0, saturation, value
+
+
+def _center_patch_hsv(hsv: np.ndarray, cx: int, cy: int) -> Tuple[float, float, float]:
+    height, width = hsv.shape[:2]
+    radius = CENTER_PATCH_RADIUS
+    x1, x2 = max(0, cx - radius), min(width, cx + radius + 1)
+    y1, y2 = max(0, cy - radius), min(height, cy + radius + 1)
+    return _circular_hsv_mean(hsv[y1:y2, x1:x2])
+
+
+def _hue_distance(value: float, center: float) -> float:
+    delta = abs(float(value) - float(center))
+    return min(delta, 180.0 - delta)
+
+
+def _adaptive_color_profile(
+    hsv: np.ndarray,
+    candidates: Sequence[CircleCandidate],
+) -> Dict[str, float]:
+    """只從幾何圓環附近取樣，避免整張 UI 的按鈕/圖示污染紅藍中心。"""
+    height, width = hsv.shape[:2]
+    filtered = list(candidates)
+    if filtered:
+        diameters = np.asarray([item.diameter for item in filtered], dtype=np.float64)
+        median_diameter = float(np.median(diameters))
+        filtered = [
+            item for item in filtered
+            if 0.58 * median_diameter <= item.diameter <= 1.55 * median_diameter
+            and item.circularity >= max(0.22, MIN_CIRCULARITY * 0.75)
+        ] or list(candidates)
+
+    sampled: List[np.ndarray] = []
+    dark_road = bool(
+        VISION_DARK_ROAD_COLOR_GEOMETRY
+        and float(np.median(hsv[:, :, 2])) <= VISION_DARK_ROAD_MAX_VALUE
+    )
+    for candidate in filtered[:160]:
+        radius = max(4.0, candidate.diameter / 2.0)
+        outer_ratio = VISION_DARK_RING_OUTER_RATIO if dark_road else 0.68
+        inner_ratio = VISION_DARK_RING_INNER_RATIO if dark_road else 0.18
+        outer = max(3, int(round(radius * outer_ratio)))
+        inner = max(1, int(round(radius * inner_ratio)))
+        x1, x2 = max(0, candidate.x - outer), min(width, candidate.x + outer + 1)
+        y1, y2 = max(0, candidate.y - outer), min(height, candidate.y + outer + 1)
+        patch = hsv[y1:y2, x1:x2]
+        if patch.size == 0:
+            continue
+        yy, xx = np.ogrid[:patch.shape[0], :patch.shape[1]]
+        cx = candidate.x - x1
+        cy = candidate.y - y1
+        distance2 = (xx - cx) ** 2 + (yy - cy) ** 2
+        annulus = (distance2 <= outer ** 2) & (distance2 >= inner ** 2)
+        pixels = patch[annulus]
+        if pixels.size:
+            sampled.append(pixels.reshape(-1, 3))
+
+    if sampled:
+        pixels = np.concatenate(sampled, axis=0)
+    else:
+        # 幾何候選不足才退回整張 crop；仍使用不與綠色重疊的藍色 seed。
+        pixels = hsv.reshape(-1, 3)
+
+    hue = pixels[:, 0].astype(np.float32)
+    saturation = pixels[:, 1].astype(np.float32)
+    value = pixels[:, 2].astype(np.float32)
+    valid = (saturation >= 16) & (value >= 25)
+    red_seed = valid & ((hue <= 28) | (hue >= 152))
+    blue_seed = valid & (hue >= 82) & (hue <= 155)
+
+    def _floor(values: np.ndarray, fallback: float, low: float) -> float:
+        if values.size < 8:
+            return float(fallback)
+        return float(np.clip(np.percentile(values, 18) * 0.60, low, fallback))
+
+    red_hues = hue[red_seed]
+    if red_hues.size >= 8:
+        signed = np.where(red_hues > 90.0, red_hues - 180.0, red_hues)
+        center_signed = float(np.median(signed))
+        red_center = center_signed % 180.0
+        red_tol = float(np.clip(
+            12.0 + np.median(np.abs(signed - center_signed)) * 2.0,
+            14.0,
+            30.0,
+        ))
+    else:
+        red_center, red_tol = 0.0, 20.0
+
+    blue_hues = hue[blue_seed]
+    if blue_hues.size >= 8:
+        blue_center = float(np.median(blue_hues))
+        blue_tol = float(np.clip(
+            14.0 + np.median(np.abs(blue_hues - blue_center)) * 1.8,
+            16.0,
+            32.0,
+        ))
+    else:
+        blue_center, blue_tol = 112.0, 28.0
+
+    return {
+        "red_center": red_center,
+        "red_tol": red_tol,
+        "red_s": _floor(saturation[red_seed], MIN_SATURATION, 18.0),
+        "blue_center": blue_center,
+        "blue_tol": blue_tol,
+        "blue_s": _floor(saturation[blue_seed], MIN_SATURATION, 18.0),
+        "sample_source": "ring_candidates" if sampled else "crop_fallback",
+        "sample_count": int(pixels.shape[0]),
+    }
+
+
+def _classify_local_color(
+    hue: float,
+    saturation: float,
+    value: float,
+    profile: Dict[str, float] | None = None,
+) -> str:
+    if value < 28.0:
+        return ""
+    if profile:
+        red_ok = (
+            saturation >= profile["red_s"]
+            and _hue_distance(hue, profile["red_center"]) <= profile["red_tol"]
+        )
+        blue_ok = (
+            saturation >= profile["blue_s"]
+            and _hue_distance(hue, profile["blue_center"]) <= profile["blue_tol"]
+        )
+        if red_ok and not blue_ok:
+            return "B"
+        if blue_ok and not red_ok:
+            return "P"
+        if red_ok and blue_ok:
+            return (
+                "B"
+                if _hue_distance(hue, profile["red_center"])
+                <= _hue_distance(hue, profile["blue_center"])
+                else "P"
+            )
+        return ""
+
+    if saturation < MIN_SATURATION:
+        return ""
+    red_distance = min(abs(hue), abs(hue - 180.0))
+    blue_distance = abs(hue - 110.0)
+    red_allowed = hue <= 20.0 or hue >= 160.0
+    blue_allowed = 78.0 <= hue <= 145.0
+    if red_allowed and (not blue_allowed or red_distance <= blue_distance):
+        return "B"
+    if blue_allowed:
+        return "P"
+    return ""
+
+
+def _ring_color_stats(
+    hsv: np.ndarray,
+    candidate: CircleCandidate,
+    profile: Dict[str, float] | None = None,
+) -> Tuple[str, float, float, float, float, float]:
+    """只讀取圓圈外框環形區域，適用紅／藍空心圓。"""
+    height, width = hsv.shape[:2]
+    radius = max(4.0, candidate.diameter / 2.0)
+    dark_road = bool(
+        VISION_DARK_ROAD_COLOR_GEOMETRY
+        and float(np.median(hsv[:, :, 2])) <= VISION_DARK_ROAD_MAX_VALUE
+    )
+    outer_ratio = VISION_DARK_RING_OUTER_RATIO if dark_road else RING_OUTER_RATIO
+    inner_ratio = VISION_DARK_RING_INNER_RATIO if dark_road else RING_INNER_RATIO
+    outer = max(3, int(round(radius * outer_ratio)))
+    inner = max(1, int(round(radius * inner_ratio)))
+    x1, x2 = max(0, candidate.x - outer), min(width, candidate.x + outer + 1)
+    y1, y2 = max(0, candidate.y - outer), min(height, candidate.y + outer + 1)
+    patch = hsv[y1:y2, x1:x2]
+    if patch.size == 0:
+        return "", 0.0, 0.0, 0.0, 0.0, 0.0
+
+    yy, xx = np.ogrid[:patch.shape[0], :patch.shape[1]]
+    cx = candidate.x - x1
+    cy = candidate.y - y1
+    distance2 = (xx - cx) ** 2 + (yy - cy) ** 2
+    mask = (distance2 <= outer ** 2) & (distance2 >= inner ** 2)
+    pixels = patch[mask]
+    if pixels.size == 0:
+        return "", 0.0, 0.0, 0.0, 0.0, 0.0
+
+    h = pixels[:, 0].astype(np.float64)
+    s = pixels[:, 1].astype(np.float64)
+    v = pixels[:, 2].astype(np.float64)
+    denominator = max(1, int(np.count_nonzero(mask)))
+    if profile:
+        red = (
+            (s >= profile["red_s"])
+            & (v >= 28.0)
+            & (np.minimum(np.abs(h - profile["red_center"]), 180.0 - np.abs(h - profile["red_center"])) <= profile["red_tol"])
+        )
+        blue = (
+            (s >= profile["blue_s"])
+            & (v >= 28.0)
+            & (np.minimum(np.abs(h - profile["blue_center"]), 180.0 - np.abs(h - profile["blue_center"])) <= profile["blue_tol"])
+        )
+    else:
+        valid = (s >= MIN_SATURATION) & (v >= 30.0)
+        red = valid & ((h <= 22.0) | (h >= 158.0))
+        blue = valid & (h >= 75.0) & (h <= 148.0)
+    red_ratio = float(np.count_nonzero(red)) / denominator
+    blue_ratio = float(np.count_nonzero(blue)) / denominator
+
+    colored = pixels[red | blue]
+    hue, saturation, value = _circular_hsv_mean(colored.reshape(-1, 1, 3)) if colored.size else (0.0, 0.0, 0.0)
+    best_ratio = max(red_ratio, blue_ratio)
+    if best_ratio < RING_MIN_COLOR_RATIO:
+        return "", red_ratio, blue_ratio, hue, saturation, value
+    if red_ratio > blue_ratio * 1.10:
+        return "B", red_ratio, blue_ratio, hue, saturation, value
+    if blue_ratio > red_ratio * 1.10:
+        return "P", red_ratio, blue_ratio, hue, saturation, value
+    return "", red_ratio, blue_ratio, hue, saturation, value
+
+
+def _preprocess_geometry(image: np.ndarray) -> np.ndarray:
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    smallest_side = min(gray.shape[:2])
+    if smallest_side < 5:
+        raise ValueError("圖片尺寸太小，無法辨識路紙。")
+    block_size = min(ADAPTIVE_BLOCK_SIZE, smallest_side if smallest_side % 2 else smallest_side - 1)
+    block_size = max(3, block_size)
+    white_background = cv2.adaptiveThreshold(
+        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, block_size, ADAPTIVE_C
+    )
+    contour_map = cv2.bitwise_not(white_background)
+    contour_map = cv2.morphologyEx(
+        contour_map, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
+    )
+    contour_map = cv2.morphologyEx(
+        contour_map, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    )
+    if VISION_DARK_ROAD_COLOR_GEOMETRY and float(np.mean(gray)) <= VISION_DARK_ROAD_MAX_VALUE:
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        hue, saturation, value = cv2.split(hsv)
+        # The DB road itself is dark maroon and falls in the red hue range.
+        # Keep only colour brighter than that local background so it contributes
+        # ring outlines rather than one giant background contour.
+        color_value_floor = max(
+            VISION_DARK_COLOR_VALUE_FLOOR,
+            float(np.median(value)) + VISION_DARK_COLOR_VALUE_DELTA,
+        )
+        high_saturation = (
+            (saturation >= max(14.0, MIN_SATURATION * 0.75))
+            & (value >= color_value_floor)
+        )
+        red_or_blue = ((hue <= 30) | (hue >= 150) | ((hue >= 76) & (hue <= 156)))
+        color_edges = (high_saturation & red_or_blue).astype(np.uint8) * 255
+        color_edges = cv2.morphologyEx(
+            color_edges,
+            cv2.MORPH_CLOSE,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+        )
+        contour_map = cv2.bitwise_or(contour_map, color_edges)
+    return contour_map
+
+
+def _geometry_candidates(image: np.ndarray, contour_map: np.ndarray) -> List[CircleCandidate]:
+    contours, _ = cv2.findContours(contour_map, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    if len(contours) > VISION_MAX_RAW_CONTOURS:
+        contours = sorted(contours, key=cv2.contourArea, reverse=True)[:VISION_MAX_RAW_CONTOURS]
+    image_area = float(image.shape[0] * image.shape[1])
+    max_area = max(MIN_CIRCLE_AREA * 4.0, image_area * MAX_CIRCLE_AREA_RATIO)
+    candidates: List[CircleCandidate] = []
+    for contour in contours:
+        area = float(cv2.contourArea(contour))
+        if area < MIN_CIRCLE_AREA or area > max_area:
+            continue
+        x, y, width, height = cv2.boundingRect(contour)
+        if width < 5 or height < 5:
+            continue
+        aspect_ratio = width / float(max(1, height))
+        if not 0.70 <= aspect_ratio <= 1.38:
+            continue
+        perimeter = float(cv2.arcLength(contour, True))
+        if perimeter <= 0:
+            continue
+        circularity = 4.0 * math.pi * area / (perimeter * perimeter)
+        if circularity < MIN_CIRCULARITY:
+            continue
+        fill_ratio = area / float(max(1, width * height))
+        if not 0.04 <= fill_ratio <= 0.96:
+            continue
+        candidates.append(CircleCandidate(
+            x=int(x + width / 2), y=int(y + height / 2), width=int(width), height=int(height),
+            area=area, circularity=circularity, fill_ratio=fill_ratio,
+        ))
+        if len(candidates) >= VISION_MAX_CIRCLE_CANDIDATES:
+            break
+    return candidates
+
+
+def _deduplicate_candidates(candidates: Sequence[CircleCandidate]) -> List[CircleCandidate]:
+    if not candidates:
+        return []
+    median_diameter = float(np.median([item.diameter for item in candidates]))
+    center_threshold = max(3.0, median_diameter * 0.38)
+    ordered = sorted(
+        candidates,
+        key=lambda item: (item.circularity, -abs(item.diameter - median_diameter), item.area),
+        reverse=True,
+    )
+    accepted: List[CircleCandidate] = []
+    for item in ordered:
+        if any(math.hypot(item.x - old.x, item.y - old.y) <= center_threshold for old in accepted):
+            continue
+        accepted.append(item)
+    return accepted
+
+
+def _cluster_axis(values: Sequence[int], tolerance: float) -> List[float]:
+    centers: List[List[float]] = []
+    for value in sorted(float(v) for v in values):
+        target = None
+        for cluster in centers:
+            if abs(value - float(np.mean(cluster))) <= tolerance:
+                target = cluster
+                break
+        if target is None:
+            centers.append([value])
+        else:
+            target.append(value)
+    return [float(np.mean(cluster)) for cluster in centers]
+
+
+def _nearest_index(value: float, centers: Sequence[float]) -> Tuple[int, float]:
+    index = min(range(len(centers)), key=lambda i: abs(float(value) - centers[i]))
+    return index, abs(float(value) - centers[index])
+
+
+def _reconstruct_big_road_detailed(
+    grid: Dict[Tuple[int, int], CircleCandidate],
+) -> Dict[str, Any]:
+    """依大路規則完整反推；長龍一旦右黏，就保持同列向右。"""
+    if not grid:
+        return {
+            "ordered": [],
+            "reconstructed_all": False,
+            "fallback_reason": "no_grid_cells",
+            "partial": [],
+            "solution_count": 0,
+        }
+    if (0, 0) not in grid:
+        return {
+            "ordered": [],
+            "reconstructed_all": False,
+            "fallback_reason": "missing_big_road_origin_0_0",
+            "partial": [],
+            "solution_count": 0,
+        }
+
+    first = grid[(0, 0)]
+    target_count = len(grid)
+    best: List[CircleCandidate] = [first]
+    solutions: List[List[CircleCandidate]] = []
+    search_started = time.perf_counter()
+    nodes = 0
+    budget_exhausted = False
+    stack: List[Tuple[Tuple[CircleCandidate, ...], frozenset[Tuple[int, int]], Tuple[int, int], int, bool]] = [
+        ((first,), frozenset({(0, 0)}), (0, 0), 0, False)
+    ]
+
+    def _next_open(
+        start: int,
+        row: int,
+        occupied: frozenset[Tuple[int, int]],
+    ) -> Tuple[int, int] | None:
+        for offset in range(target_count + 1):
+            candidate = (start + offset, row)
+            if candidate not in occupied:
+                return candidate
+        return None
+
+    while stack:
+        nodes += 1
+        if (
+            nodes > VISION_RECONSTRUCT_MAX_NODES
+            or time.perf_counter() - search_started > VISION_RECONSTRUCT_MAX_SECONDS
+        ):
+            budget_exhausted = True
+            break
+        ordered, occupied, current, start_column, tailing_right = stack.pop()
+        if len(ordered) > len(best):
+            best = list(ordered)
+        if len(ordered) == target_count:
+            solutions.append(list(ordered))
+            if len(solutions) >= 2:
+                break
+            continue
+
+        last_side = ordered[-1].outcome
+        column, row = current
+        options: List[Tuple[CircleCandidate, Tuple[int, int], int, bool]] = []
+        if not tailing_right and row < 5 and (column, row + 1) not in occupied:
+            same_cell, next_tailing = (column, row + 1), False
+        else:
+            same_cell, next_tailing = _next_open(column + 1, row, occupied), True
+        same_item = grid.get(same_cell) if same_cell is not None else None
+        if same_item is not None and same_item.outcome == last_side:
+            options.append((same_item, same_cell, start_column, next_tailing))
+
+        opposite = "P" if last_side == "B" else "B"
+        opposite_cell = _next_open(start_column + 1, 0, occupied)
+        opposite_item = grid.get(opposite_cell) if opposite_cell is not None else None
+        if opposite_item is not None and opposite_item.outcome == opposite:
+            options.append((opposite_item, opposite_cell, start_column + 1, False))
+
+        for item, cell, next_start, next_tail in reversed(options):
+            stack.append((
+                ordered + (item,),
+                occupied | frozenset({cell}),
+                cell,
+                next_start,
+                next_tail,
+            ))
+
+    if len(solutions) == 1:
+        return {
+            "ordered": solutions[0],
+            "reconstructed_all": True,
+            "fallback_reason": "",
+            "partial": solutions[0],
+            "solution_count": 1,
+        }
+    reason = (
+        f"big_road_reconstruction_budget_exhausted_{len(best)}_of_{target_count}"
+        if budget_exhausted
+        else "ambiguous_big_road_reconstruction"
+        if len(solutions) > 1
+        else f"incomplete_big_road_reconstruction_{len(best)}_of_{target_count}"
+    )
+    return {
+        "ordered": [],
+        "reconstructed_all": False,
+        "fallback_reason": reason,
+        "partial": best,
+        "solution_count": len(solutions),
+    }
+
+
+def _reconstruct_big_road(
+    grid: Dict[Tuple[int, int], CircleCandidate],
+) -> List[CircleCandidate]:
+    return list(_reconstruct_big_road_detailed(grid).get("ordered") or [])
+
+
+def _sort_big_road_detailed(candidates: Sequence[CircleCandidate]) -> Dict[str, Any]:
+    """輪廓先映射六列格位，再要求完整、唯一的時間序反推。"""
+    if not candidates:
+        return {
+            "ordered": [],
+            "grid_items": [],
+            "grid_count": 0,
+            "reconstructed_all": False,
+            "fallback_reason": "no_colored_candidates",
+            "solution_count": 0,
+        }
+    diameters = [item.diameter for item in candidates]
+    median_diameter = float(np.median(diameters))
+    size_filtered = [
+        item for item in candidates
+        if 0.58 * median_diameter <= item.diameter <= 1.55 * median_diameter
+    ] or list(candidates)
+
+    x_centers = _cluster_axis(
+        [item.x for item in size_filtered], max(3.0, median_diameter * 0.48)
+    )
+    y_centers = _cluster_axis(
+        [item.y for item in size_filtered], max(3.0, median_diameter * 0.48)
+    )
+    x_centers.sort()
+    y_centers.sort()
+    if len(y_centers) > 6:
+        counts = [
+            sum(abs(item.y - center) <= median_diameter * 0.48 for item in size_filtered)
+            for center in y_centers
+        ]
+        keep = sorted(range(len(y_centers)), key=lambda index: counts[index], reverse=True)[:6]
+        y_centers = sorted(y_centers[index] for index in keep)
+    if not x_centers or not y_centers:
+        return {
+            "ordered": [],
+            "grid_items": [],
+            "grid_count": 0,
+            "reconstructed_all": False,
+            "fallback_reason": "grid_axis_clustering_failed",
+            "solution_count": 0,
+        }
+
+    grid: Dict[Tuple[int, int], CircleCandidate] = {}
+    max_residual = median_diameter * 0.46
+    for item in size_filtered:
+        column, dx = _nearest_index(item.x, x_centers)
+        row, dy = _nearest_index(item.y, y_centers)
+        if dx > max_residual or dy > max_residual or row > 5:
+            continue
+        cell = (column, row)
+        old = grid.get(cell)
+        quality = max(item.red_ratio, item.blue_ratio, item.saturation / 255.0) + item.circularity
+        old_quality = (
+            -1.0
+            if old is None
+            else max(old.red_ratio, old.blue_ratio, old.saturation / 255.0) + old.circularity
+        )
+        if old is None or quality > old_quality:
+            grid[cell] = item
+
+    if not grid:
+        return {
+            "ordered": [],
+            "grid_items": [],
+            "grid_count": 0,
+            "reconstructed_all": False,
+            "fallback_reason": "no_candidates_mapped_to_grid",
+            "solution_count": 0,
+        }
+    minimum_column = min(column for column, _ in grid)
+    normalized = {(column - minimum_column, row): item for (column, row), item in grid.items()}
+    reconstruction = _reconstruct_big_road_detailed(normalized)
+    grid_items = [normalized[cell] for cell in sorted(normalized, key=lambda value: (value[0], value[1]))]
+    return {
+        "ordered": list(reconstruction.get("ordered") or []),
+        "grid_items": grid_items,
+        "grid_count": len(normalized),
+        "reconstructed_all": bool(reconstruction.get("reconstructed_all")),
+        "fallback_reason": str(reconstruction.get("fallback_reason") or ""),
+        "solution_count": int(reconstruction.get("solution_count", 0) or 0),
+        "partial": list(reconstruction.get("partial") or []),
+    }
+
+
+def _sort_big_road(candidates: Sequence[CircleCandidate]) -> List[CircleCandidate]:
+    return list(_sort_big_road_detailed(candidates).get("ordered") or [])
+
+def _analyze_baccarat_working_image(
+    image: np.ndarray,
+    *,
+    resize_scale: float = 1.0,
+    deadline: float | None = None,
+    cancel_event: object | None = None,
+) -> Dict[str, Any]:
+    if image is None or not isinstance(image, np.ndarray) or image.size == 0:
+        raise ValueError("無法讀取路紙圖片。")
+    _vision_deadline_guard(deadline, cancel_event, min_remaining=0.15)
+    _vision_deadline_guard(deadline, cancel_event, min_remaining=0.12)
+    contour_map = _preprocess_geometry(image)
+    _vision_deadline_guard(deadline, cancel_event, min_remaining=0.10)
+    raw_candidates = _geometry_candidates(image, contour_map)
+    unique_candidates = _deduplicate_candidates(raw_candidates)
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    color_profile = (
+        _adaptive_color_profile(hsv, unique_candidates)
+        if ADAPTIVE_COLOR
+        else None
+    )
+
+    colored: List[CircleCandidate] = []
+    unknown_candidates_raw: List[Tuple[CircleCandidate, float, float, float]] = []
+    for candidate_index, candidate in enumerate(unique_candidates):
+        if (candidate_index & 31) == 0:
+            _vision_deadline_guard(deadline, cancel_event, min_remaining=0.08)
+        outcome, red_ratio, blue_ratio, hue, saturation, value = _ring_color_stats(hsv, candidate, color_profile)
+        method = "ring_hsv"
+        if not outcome:
+            hue, saturation, value = _center_patch_hsv(hsv, candidate.x, candidate.y)
+            outcome = _classify_local_color(hue, saturation, value, color_profile)
+            method = "center_hsv_fallback" if outcome else "unknown"
+        if not outcome:
+            unknown_candidates_raw.append((candidate, float(red_ratio), float(blue_ratio), float(saturation)))
+            continue
+        colored.append(CircleCandidate(
+            x=candidate.x, y=candidate.y, width=candidate.width, height=candidate.height,
+            area=candidate.area, circularity=candidate.circularity, fill_ratio=candidate.fill_ratio,
+            outcome=outcome, hue=round(hue, 3), saturation=round(saturation, 3), value=round(value, 3),
+            red_ratio=round(red_ratio, 4), blue_ratio=round(blue_ratio, 4), color_method=method,
+        ))
+
+    _vision_deadline_guard(deadline, cancel_event, min_remaining=0.05)
+    ordering = _sort_big_road_detailed(colored)
+    ordered = list(ordering.get("ordered") or [])
+    sequence = [item.outcome for item in ordered]
+    reconstructed_all = bool(ordering.get("reconstructed_all"))
+    fallback_reason = str(ordering.get("fallback_reason") or "")
+    detected_grid_count = int(ordering.get("grid_count", len(ordered)) or 0)
+
+    # 不把格線交叉點、文字與其他小圖示全部算成「未知局」。
+    # 只計算尺寸接近已辨識大路圓圈的候選，避免品質檢查被背景雜訊拖垮。
+    if colored:
+        median_diameter = float(np.median([item.diameter for item in colored]))
+        plausible_unknown = [
+            item for item, red_ratio, blue_ratio, saturation in unknown_candidates_raw
+            if 0.62 * median_diameter <= item.diameter <= 1.45 * median_diameter
+            and (red_ratio + blue_ratio >= RING_MIN_COLOR_RATIO * 0.55 or saturation >= MIN_SATURATION * 1.35)
+        ]
+    else:
+        plausible_unknown = []
+    unknown = len(plausible_unknown)
+    # 依已確認的時間序列重建邏輯六列格位；圖片像素座標仍保留在 candidate。
+    try:
+        from full_road_pattern_model import build_big_road
+        logical = build_big_road(sequence)
+        logical_cells = list(logical.get("cells") or [])
+    except Exception:
+        logical_cells = []
+    grid_cells = []
+    for index, item in enumerate(ordered):
+        logical_cell = logical_cells[index] if index < len(logical_cells) else {}
+        color_strength = max(float(item.red_ratio), float(item.blue_ratio), min(1.0, float(item.saturation) / 255.0))
+        confidence = max(0.0, min(1.0, 0.45 * color_strength + 0.35 * float(item.circularity) + 0.20 * min(1.0, float(item.fill_ratio))))
+        grid_cells.append({
+            "index": index, "outcome": item.outcome,
+            "column": int(logical_cell.get("column", 0) or 0),
+            "row": int(logical_cell.get("row", 0) or 0),
+            "x": int(item.x), "y": int(item.y),
+            "confidence": round(confidence, 6),
+        })
+    uncertain_count = int(unknown)
+    candidate_total = len(sequence) + uncertain_count
+    unknown_ratio = uncertain_count / max(1, candidate_total)
+    quality_ok = bool(
+        len(sequence) >= MIN_RECOGNIZED_FOR_PREDICTION
+        and unknown_ratio <= MAX_UNKNOWN_RATIO
+        and reconstructed_all
+    )
+    return {
+        "ok": bool(sequence) and quality_ok,
+        "quality_ok": quality_ok,
+        "sequence": sequence,
+        "raw_outcomes": list(sequence),
+        "grid_cells": grid_cells,
+        "recognized_count": detected_grid_count,
+        "sequence_count": len(sequence),
+        "confirmed_round_count": len(sequence),
+        "uncertain_count": uncertain_count,
+        "unknown_ratio": round(unknown_ratio, 6),
+        "count_is_confirmed": bool(quality_ok and uncertain_count == 0),
+        "estimated_candidate_total": candidate_total,
+        "unknown_candidates": unknown,
+        "raw_contours": len(raw_candidates),
+        "unique_geometry_candidates": len(unique_candidates),
+        "image_size": {
+            "width": int(image.shape[1]), "height": int(image.shape[0]),
+            "resize_scale": round(float(resize_scale), 6),
+        },
+        "candidates": [asdict(item) for item in colored],
+        "reconstructed_all": reconstructed_all,
+        "reconstruction_solution_count": int(ordering.get("solution_count", 0) or 0),
+        "fallback_reason": fallback_reason,
+        "method": "adaptive_contour_ring_hsv_grid_quality_v10_9",
+    }
+
+
+def _analysis_rank(result: Dict[str, Any]) -> Tuple[int, int, int, int, float]:
+    unknown_value = result.get("unknown_ratio", 1.0)
+    unknown_ratio = float(1.0 if unknown_value is None else unknown_value)
+    return (
+        1 if bool(result.get("quality_ok")) else 0,
+        1 if bool(result.get("reconstructed_all")) else 0,
+        int(result.get("sequence_count", 0) or 0),
+        int(result.get("recognized_count", 0) or 0),
+        -unknown_ratio,
+    )
+
+
+def _retry_scale_factor(image: np.ndarray) -> float:
+    longest = max(image.shape[:2])
+    if longest * 1.25 <= MAX_IMAGE_SIDE:
+        return 1.25
+    return 0.85
+
+
+def analyze_baccarat_array_detailed(
+    source: np.ndarray,
+    *,
+    deadline: float | None = None,
+    cancel_event: object | None = None,
+    _normalization_meta: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    if source is None or not isinstance(source, np.ndarray) or source.size == 0:
+        raise ValueError("無法讀取路紙圖片。")
+
+    if _normalization_meta is None:
+        working, resize_scale, normalization = _resize_for_analysis(
+            source, deadline=deadline, cancel_event=cancel_event
+        )
+    else:
+        working = source
+        normalization = dict(_normalization_meta)
+        resize_scale = float(normalization.get("scale", 1.0) or 1.0)
+
+    primary = _analyze_baccarat_working_image(
+        working,
+        resize_scale=resize_scale,
+        deadline=deadline,
+        cancel_event=cancel_event,
+    )
+    best = primary
+    scale_attempts = [{
+        "scale": 1.0,
+        "unique_candidates": int(primary.get("unique_geometry_candidates", 0) or 0),
+        "recognized_count": int(primary.get("recognized_count", 0) or 0),
+        "quality_ok": bool(primary.get("quality_ok")),
+    }]
+    sparse_primary = bool(
+        int(primary.get("unique_geometry_candidates", 0) or 0)
+        < VISION_SCALE_RETRY_MIN_CANDIDATES
+        or int(primary.get("recognized_count", 0) or 0)
+        < MIN_RECOGNIZED_FOR_PREDICTION
+    )
+    if (
+        VISION_SCALE_RETRY_ENABLED
+        and VISION_MAX_SCALES >= 2
+        and sparse_primary
+    ):
+        try:
+            _vision_deadline_guard(deadline, cancel_event, min_remaining=0.15)
+            factor = _retry_scale_factor(working)
+            retry = cv2.resize(
+                working,
+                (
+                    max(1, int(round(working.shape[1] * factor))),
+                    max(1, int(round(working.shape[0] * factor))),
+                ),
+                interpolation=cv2.INTER_CUBIC if factor > 1.0 else cv2.INTER_AREA,
+            )
+            retried = _analyze_baccarat_working_image(
+                retry,
+                resize_scale=resize_scale * factor,
+                deadline=deadline,
+                cancel_event=cancel_event,
+            )
+            scale_attempts.append({
+                "scale": round(float(factor), 3),
+                "unique_candidates": int(retried.get("unique_geometry_candidates", 0) or 0),
+                "recognized_count": int(retried.get("recognized_count", 0) or 0),
+                "quality_ok": bool(retried.get("quality_ok")),
+            })
+            if _analysis_rank(retried) > _analysis_rank(best):
+                best = retried
+        except TimeoutError:
+            # Primary output remains valid; skip the optional scale retry on deadline.
+            pass
+        except Exception as exc:
+            scale_attempts.append({"scale": "retry_failed", "error": str(exc)[:120]})
+
+    output = dict(best)
+    output["normalization"] = normalization
+    output["scale_attempts"] = scale_attempts
+    return output
+
+
+def analyze_baccarat_image_detailed(
+    image_path: str | Path,
+    *,
+    deadline: float | None = None,
+    cancel_event: object | None = None,
+) -> Dict[str, Any]:
+    image, meta = normalize_capture(
+        image_path,
+        max_side=MAX_IMAGE_SIDE,
+        enhance=VISION_LIGHT_ENHANCE,
+        deadline=deadline,
+        cancel_event=cancel_event,
+    )
+    if image is None:
+        raise ValueError(str(meta.get("error") or "無法讀取路紙圖片。"))
+    return analyze_baccarat_array_detailed(
+        image,
+        deadline=deadline,
+        cancel_event=cancel_event,
+        _normalization_meta=dict(meta),
+    )
+
+
+def analyze_baccarat_image(image_path: str | Path) -> List[str]:
+    return list(analyze_baccarat_image_detailed(image_path).get("sequence") or [])
+
+
+__all__ = [
+    "analyze_baccarat_array_detailed",
+    "analyze_baccarat_image",
+    "analyze_baccarat_image_detailed",
+]
