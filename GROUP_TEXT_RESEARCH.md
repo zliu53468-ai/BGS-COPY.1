@@ -97,3 +97,15 @@
 - 研究觀望不等於 Kelly 模擬級距為 0；方向是否顯示 B/P 僅依 BBB `research_view.direction + eligible`，Kelly 0/5/10/20 只影響模擬單位，兩者不能混為一談。
 - 觀望可能是研究 Gate 真正未通過：例如樣本不足、EV 分離不足、雜訊太高、粒子 ESS／多樣性不足。此版本顯示原因以利診斷，不會為了減少觀望而放寬標準或捏造正 EV；正式 `action=Skip` / `bankroll_fraction=0` / `validated_edge=false` 繼續保持。
 - 完整回滾：在 `BGS-COPY.1` 使用 `backup/pre-clear-and-observe-fix-20261113` 對照舊檔，或 revert 本次 PR 合併 commit；需部署新 Commit 到 Render 才會生效。
+
+
+## 群組下方快捷按鈕與精簡回覆（2026-11-13）
+
+- 只調整 `BGS-COPY.1` 的群組訊息呈現；不修改 Soft Shoe V5.1、ROAD_AUX、實際正式下注 Skip、OCR 辨識器、權限或私人原始 `app.py`。
+- 群組訊息附帶 LINE Messaging API 的 **Quick Reply**（iOS/Android）：`▶ 開始分析`、`📷 上傳牌路`（相簿動作）、`📊 查詢狀態`、`🔴 莊`、`🔵 閒`、`🟢 和`、`⏹ 結束分析`。前六項文字命令與原管理員 UID 和群組 ID 白名單完全相同；非管理員點擊不觸發模型。
+- 這是**下方快速回覆按鈕，不是永久 Rich Menu**。依 LINE 規則，群組有人發出新訊息後 Quick Reply 可能消失；BOT 下一次回覆時會再次帶出。LINE PC 桌面端可能無法使用快速按鈕，請以手機版驗收。
+- 收到群組截圖時，用同群組 replyToken 回覆「⏳ 牌路掃描中」；掃描完成後使用 `_push(groupId)` 把精簡分析及按鈕送回該群組，**不推送到管理員個人 UID**。
+- LINE 官方的 `/v2/bot/chat/loading/start` **只支援一對一聊天室，不支援群組**；因此群組不能使用原生 Loading 轉圈動畫。上述「⏳」是群組相容的文字進度提示，非 LINE 官方動畫，不會呼叫不支援的 API。
+- 識別下一局：圖片或手動輸入已確認 `history.length=N` 局，群組顯示 **第 N+1 局（下一局）**，並只列 `研究方向：莊／閒／觀望`、`模擬配注：0／5／10／20 注`、`正式下注：Skip／0 注`。真正觀望時，額外只顯示最主要的原因。未過門檻時不能硬給方向；Kelly 不足 5 注時顯示原研究方向但配注 0 注。
+- 此精簡訊息省略冗長技術及重複 OCR/統計敘述；原群組 `查詢狀態`、管理員累計 -30 注休息、`結束分析` 清除歷史等功能不變。
+- 回滾：比對 `backup/pre-group-quickreply-20261113`；可 revert 本次 PR 合併提交。若 Render Auto-Deploy 關閉，需要手動部署最新 main SHA。

@@ -86,20 +86,21 @@ class GroupTextResearchTests(unittest.TestCase):
         started = self.call("開始分析", uid="U-admin-1")
         self.assertIn("已開始", started)
         message = self.call("紅")
-        self.assertIn("下一局研究：🔴 莊｜5 注", message)
-        self.assertIn("累計注數：+0 注", message)
-        self.assertIn("正式決策：Skip／0 注", message)
+        self.assertIn("第 2 局（下一局）", message)
+        self.assertIn("研究方向：🔴 莊", message)
+        self.assertIn("模擬配注：5 注", message)
+        self.assertIn("正式下注：Skip／0 注", message)
+        self.assertEqual(self.state()["net_units"], 0)
 
     def test_start_outcomes_and_tie_are_group_only_and_skip(self):
         self.assertIn("已開始", self.call("開始分析"))
         msg = self.call("紅")
-        self.assertIn("第 1 局", msg)
-        self.assertIn("🔴 莊", msg)
-        self.assertIn("Kelly 模擬分級：5 注", msg)
-        self.assertIn("正式決策：Skip／0 注", msg)
-        self.assertIn("⚠️ 未驗證獲利優勢", msg)
-        self.assertIn("🔵 閒", self.call("藍"))
-        self.assertIn("🟢 和", self.call("和"))
+        self.assertIn("第 2 局（下一局）", msg)
+        self.assertIn("研究方向：🔴 莊", msg)
+        self.assertIn("模擬配注：5 注", msg)
+        self.assertIn("正式下注：Skip／0 注", msg)
+        self.assertIn("第 3 局（下一局）", self.call("藍"))
+        self.assertIn("第 4 局（下一局）", self.call("和"))
         self.assertEqual(self.state()["history"], ["B", "P", "T"])
         self.assertEqual(self.state()["net_units"], 0)
         self.assertEqual(self.histories, [
@@ -178,7 +179,7 @@ class GroupTextResearchTests(unittest.TestCase):
             self.event("紅"), environ=self.env,
             predictor=no_edge, state_path=self.path)
         self.assertIn("⚪ 觀望", result)
-        self.assertIn("模擬分級：0 注", result)
+        self.assertIn("模擬配注：0 注", result)
         self.assertEqual(self.state()["last_research_direction"], "SKIP")
 
     def test_kelly_calculation_floored_to_tiers(self):
@@ -252,10 +253,10 @@ class GroupTextResearchTests(unittest.TestCase):
         msg = handle_group_event(
             self.event("紅"), environ=self.env,
             predictor=low_tier, state_path=self.path)
-        self.assertIn("下一局研究：🔴 莊｜0 注", msg)
-        self.assertNotIn("下一局研究：⚪ 觀望", msg)
-        self.assertIn("模擬 Kelly 級距不足 5 注", msg)
-        self.assertIn("正式決策：Skip／0 注", msg)
+        self.assertIn("研究方向：🔴 莊", msg)
+        self.assertNotIn("研究方向：⚪ 觀望", msg)
+        self.assertIn("模擬配注：0 注", msg)
+        self.assertIn("正式下注：Skip／0 注", msg)
         self.assertEqual(self.state()["last_research_direction"], "B")
         self.assertEqual(self.state()["pending_tier"], 0)
 
@@ -273,9 +274,9 @@ class GroupTextResearchTests(unittest.TestCase):
         msg = handle_group_event(
             self.event("紅"), environ=self.env,
             predictor=uncertain, state_path=self.path)
-        self.assertIn("下一局研究：⚪ 觀望｜0 注", msg)
-        self.assertIn("觀望原因：莊閒估計 EV 差距不足、方向差距低於抽樣噪音", msg)
-        self.assertIn("模型候選：🔴 莊（未通過研究門檻", msg)
+        self.assertIn("研究方向：⚪ 觀望", msg)
+        self.assertIn("觀望原因：莊閒 EV 差距不足", msg)
+        self.assertIn("模擬配注：0 注", msg)
         self.assertEqual(self.state()["last_research_direction"], "SKIP")
 
     def test_max_history_never_silently_truncated(self):

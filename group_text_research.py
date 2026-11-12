@@ -138,49 +138,37 @@ def _research(history: list[str], predictor: Callable[[list[str]], Mapping[str, 
     if road.get("validated_betting_edge") is not False:
         raise RuntimeError("安全鎖定：牌路不得授權正式下注")
     tier, fractional = _kelly_simulation(report, direction)
-    road_note = ("路同向" if view.get("road_confirmed") else
-                 "路分歧" if view.get("road_conflict") else "牌路未確認")
-    # Neither a low simulated stake nor an absent positive bankroll
-    # fraction is a reason to re-label a valid *research* direction.
-    # A true research Skip must remain Skip; explain why rather than
-    # silently over-promising a positive-EV recommendation.
+    # Research direction comes from the unchanged BBB research gate.
+    # A zero rounded Kelly tier never turns a valid B/P into observation.
     if direction in ("B", "P"):
-        headline = f"下一局研究：{SIDE_LABEL[direction]}｜{tier} 注"
-        detail = ("配注備註：模擬 Kelly 級距不足 5 注，故顯示 0 注。"
-                  if tier == 0 else "研究門檻：通過（僅研究方向）")
+        side = SIDE_LABEL[direction]
+        note = ""
     else:
-        headline = "下一局研究：⚪ 觀望｜0 注"
-        labels = {
-            "insufficient_rounds": "牌局樣本不足",
-            "weak_ev_separation": "莊閒估計 EV 差距不足",
-            "high_estimator_uncertainty": "估計標準誤偏高",
-            "low_gap_to_noise": "方向差距低於抽樣噪音",
+        side = SIDE_LABEL["SKIP"]
+        reason_labels = {
+            "insufficient_rounds": "樣本不足",
+            "weak_ev_separation": "莊閒 EV 差距不足",
+            "high_estimator_uncertainty": "估計誤差過高",
+            "low_gap_to_noise": "方向訊號不足",
             "low_particle_ess": "粒子有效樣本不足",
             "low_particle_diversity": "粒子多樣性不足",
-            "physical_simulation_unavailable": "物理模擬未能完成",
+            "physical_simulation_unavailable": "物理模擬尚無結果",
         }
-        raw_reasons = list(view.get("reasons") or [])
-        if not raw_reasons and view.get("reason"):
-            raw_reasons = [str(view["reason"])]
-        if not raw_reasons and report.get("reason"):
-            raw_reasons = [str(report["reason"])]
-        reason_str = "、".join(
-            labels.get(str(code), str(code)) for code in raw_reasons[:3]
-        ) or "本局沒有通過研究方向門檻"
-        candidate = str(view.get("candidate") or report.get("candidate") or "")
-        reference = (
-            f"\n模型候選：{SIDE_LABEL[candidate]}（未通過研究門檻，不能當作建議）"
-            if candidate in ("B", "P") else ""
+        reasons = list(view.get("reasons") or [])
+        if not reasons:
+            why = view.get("reason") or report.get("reason") or ""
+            reasons = [str(why)] if why else []
+        note = (
+            "\n觀望原因：" + reason_labels.get(str(reasons[0]), str(reasons[0]))[:90]
+            if reasons else ""
         )
-        detail = f"觀望原因：{reason_str}{reference}"
+    # "第 N 局" is NEXT hand, after OCR/manual input of N-1 completed hands.
     msg = (
-        f"📊 AI 群組分析｜第 {len(history)} 局\n"
-        f"{headline}\n"
-        f"{detail}\n"
-        f"Kelly 模擬分級：{tier} 注（5／10／20）\n"
-        f"牌路輔助：{road_note}｜模擬尺度 {fractional * 100:.2f}%\n"
-        "⚠️ 未驗證獲利優勢；非實際投注建議。\n"
-        "正式決策：Skip／0 注"
+        f"📊 第 {len(history) + 1} 局（下一局）\n"
+        f"研究方向：{side}\n"
+        f"模擬配注：{tier} 注"
+        f"{note}\n"
+        "正式下注：Skip／0 注"
     )
     return direction, tier, msg
 
@@ -265,10 +253,9 @@ def handle_group_event(
             state = groups[group_id] = _fresh_session(state)
             state["active"] = True
             result = (
-                "✅ 群組分析已開始｜累計 0 注\n"
-                "管理員輸入：紅＝莊、藍＝閒、和＝和局\n"
-                "回覆下一局研究方向＋Kelly 模擬 0／5／10／20 注。\n"
-                "免輸入本金｜正式下注維持 Skip。"
+                "✅ 已開始新一靴｜目前 0 局\n"
+                "請上傳牌路圖片，或點下方快捷選單。\n"
+                "群組研究不需要設定本金。"
             )
         elif raw == "結束分析":
             # Explicitly delete all per-shoe B/P/T history, manual P&L logs,
@@ -301,11 +288,7 @@ def handle_group_event(
             state["history"] = history
             state["last_research_direction"] = direction
             state["pending_tier"] = tier
-            result = (
-                f"本局結果：{SIDE_LABEL[RESULTS[raw]]}\n"
-                f"{analysis}\n"
-                f"累計注數：{int(state.get('net_units', 0)):+d} 注｜-30 注暫停"
-            )
+            result = analysis
         else:
             # A bare +/- settles the last displayed simulated tier.
             amount = int(state.get("pending_tier") or 0) if raw in ("+", "-") else int(parser.group(2))
