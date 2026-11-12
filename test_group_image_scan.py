@@ -95,10 +95,10 @@ class GroupOCRTests(unittest.TestCase):
         claim = self.claim(first)
         history = ["B", "P", "T", "B", "B", "P", "T", "P"]
         result = self.done(claim, self.screen(history))
-        self.assertIn("第 9 局（下一局）", result)
-        self.assertIn("研究方向：🔴 莊", result)
-        self.assertIn("模擬配注：5 注", result)
-        self.assertIn("正式下注：Skip／0 注", result)
+        self.assertIn("第 9 局", result)
+        self.assertIn("推薦方向：🔴 莊", result)
+        self.assertIn("建議注數：5 注（模擬）", result)
+        self.assertEqual(len(result.splitlines()), 3)
         self.assertEqual(self.state()["history"], history)
         self.assertEqual(self.state()["net_units"], 0)
         self.assertNotIn("bankroll", self.state())
@@ -107,7 +107,7 @@ class GroupOCRTests(unittest.TestCase):
         self.assertEqual(len(self.predicted), 1)
         more = self.claim(self.image(event_id="img-c"))
         extended = history + ["B", "P"]
-        self.assertIn("第 11 局（下一局）", self.done(more, self.screen(extended)))
+        self.assertIn("第 11 局", self.done(more, self.screen(extended)))
         self.assertEqual(self.state()["history"], extended)
 
     def test_unsafe_or_incomplete_images_never_update_history(self):
