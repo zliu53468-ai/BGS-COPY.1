@@ -137,38 +137,25 @@ def _research(history: list[str], predictor: Callable[[list[str]], Mapping[str, 
     road = report.get("road_aux") or {}
     if road.get("validated_betting_edge") is not False:
         raise RuntimeError("安全鎖定：牌路不得授權正式下注")
-    tier, fractional = _kelly_simulation(report, direction)
-    # Research direction comes from the unchanged BBB research gate.
-    # A zero rounded Kelly tier never turns a valid B/P into observation.
-    if direction in ("B", "P"):
-        side = SIDE_LABEL[direction]
-        note = ""
-    else:
-        side = SIDE_LABEL["SKIP"]
-        reason_labels = {
-            "insufficient_rounds": "樣本不足",
-            "weak_ev_separation": "莊閒 EV 差距不足",
-            "high_estimator_uncertainty": "估計誤差過高",
-            "low_gap_to_noise": "方向訊號不足",
-            "low_particle_ess": "粒子有效樣本不足",
-            "low_particle_diversity": "粒子多樣性不足",
-            "physical_simulation_unavailable": "物理模擬尚無結果",
-        }
-        reasons = list(view.get("reasons") or [])
-        if not reasons:
-            why = view.get("reason") or report.get("reason") or ""
-            reasons = [str(why)] if why else []
-        note = (
-            "\n觀望原因：" + reason_labels.get(str(reasons[0]), str(reasons[0]))[:90]
-            if reasons else ""
-        )
-    # "第 N 局" is NEXT hand, after OCR/manual input of N-1 completed hands.
+    tier, _fractional = _kelly_simulation(report, direction)
+    # Match the exact BGS LINE Soft Shoe research direction. No local
+    # probability smoothing, threshold override, or candidate->bet fallback.
+    # This diagnostic logs NO chat ID, UID, screenshot, or personal history.
+    if str(os.getenv("GROUP_RESEARCH_GATE_LOG", "1")).strip() == "1":
+        print("group_research_gate", json.dumps({
+            "completed_hands": len(history),
+            "model_version": report.get("version"),
+            "research_direction": direction,
+            "eligible": view.get("eligible") is True,
+            "reason": str(view.get("reason") or report.get("reason") or "")[:64],
+            "kelly_tier": tier,
+        }, ensure_ascii=False, separators=(",", ":")), flush=True)
+    # Three short lines only. The number is the next hand being forecast;
+    # units are research simulations, NEVER real-money stake authorizations.
     msg = (
-        f"📊 第 {len(history) + 1} 局（下一局）\n"
-        f"研究方向：{side}\n"
-        f"模擬配注：{tier} 注"
-        f"{note}\n"
-        "正式下注：Skip／0 注"
+        f"📊 第 {len(history) + 1} 局\n"
+        f"推薦方向：{SIDE_LABEL[direction]}\n"
+        f"建議注數：{tier} 注（模擬）"
     )
     return direction, tier, msg
 
