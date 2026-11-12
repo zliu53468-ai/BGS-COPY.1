@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -147,6 +148,17 @@ class GroupOCRTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "安全鎖定"):
             finish_image(claim, self.screen(["B", "P"]), environ=self.env,
                          state_path=self.path, predictor=unsafe)
+        self.assertEqual(self.state()["history"], [])
+
+    def test_cancelled_worker_does_not_mutate_state(self):
+        self.start()
+        claim = self.claim(self.image())
+        cancel = threading.Event()
+        cancel.set()
+        result = finish_image(
+            claim, self.screen(["B", "P"]), environ=self.env,
+            state_path=self.path, predictor=self.model, cancel_event=cancel)
+        self.assertIn("逾時取消", result)
         self.assertEqual(self.state()["history"], [])
 
     def test_finish_while_paused_discards_image(self):
