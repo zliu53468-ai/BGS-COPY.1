@@ -1593,7 +1593,34 @@ async def webhook(request: Request) -> JSONResponse:
     for event in payload.get("events", []):
         token = str(event.get("replyToken") or "")
         source = event.get("source") or {}
+        source_type = str(source.get("type") or "").lower()
+        # The group text pathway is isolated from personal OCR/LIFF and
+        # receives no bankroll or old bandit/Markov features. The signature
+        # was verified above BEFORE any admin/group command is considered.
+        if source_type == "group":
+            if source.get("userId"):
+                try:
+                    from group_text_research import handle_group_event
+                    group_response = await asyncio.to_thread(handle_group_event, event)
+                    if group_response:
+                        _reply(token, [_text(group_response)])
+                except Exception:
+                    traceback.print_exc()
+                    _reply(token, [_text("⚠️ 群組研究指令暫時無法處理，沒有更新任何紀錄。")])
+            continue
+        if source_type != "user":
+            # Never let an unauthorized room or unknown group event fall back
+            # to the existing personal UID-based analysis and member ledger.
+            continue
         user_id = str(source.get("userId") or "").strip()
+        if event.get("type") == "message" and (
+            (event.get("message") or {}).get("type") == "text"
+        ) and str((event.get("message") or {}).get("text") or "").strip() in (
+            "查詢UID", "我的UID"
+        ):
+            if user_id:
+                _reply(token, [_text(f"你的 LINE UID：{user_id}\n請將此 UID 交由系統負責人在 Render 設定 GROUP_ADMIN_UIDS。")])
+            continue
         if not user_id:
             _reply(token, [_text("無法取得 LINE UID，請改在與機器人的一對一聊天室操作。")])
             continue
