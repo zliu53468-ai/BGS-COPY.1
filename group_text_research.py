@@ -207,6 +207,7 @@ def handle_group_event(
         if raw == "開始分析":
             groups[group_id] = _default()
             state = groups[group_id]
+            state["active"] = True
             result = (
                 "✅ 群組研究分析已開始；已重置本場歷史與模擬注數。\n"
                 "請管理員輸入「紅／藍／和」記錄實際結果。\n"
