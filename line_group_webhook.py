@@ -17,6 +17,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from group_text_research import handle_group_event
+from group_image_scan import reserve_image, scan_and_reply_group
 
 
 def install_group_webhook(app, legacy_app) -> None:
@@ -77,6 +78,26 @@ def install_group_webhook(app, legacy_app) -> None:
             token = str(event.get("replyToken") or "")
             if source.get("type") == "group":
                 if not source.get("userId"):
+                    continue
+                if (event.get("message") or {}).get("type") == "image":
+                    try:
+                        image_claim = await asyncio.to_thread(reserve_image, event)
+                        if isinstance(image_claim, dict):
+                            # Acknowledge in the SAME group, then perform OCR
+                            # asynchronously and push ONLY to groupId.
+                            legacy_app._reply(token, [legacy_app._text(
+                                "📷 已收到群組牌路截圖，正在自動掃描大路／珠盤並分析；完成後會直接回覆本群組。"
+                            )])
+                            legacy_app._schedule_background(
+                                scan_and_reply_group(legacy_app, image_claim)
+                            )
+                        elif isinstance(image_claim, str):
+                            legacy_app._reply(token, [legacy_app._text(image_claim)])
+                    except Exception:
+                        legacy_app.traceback.print_exc()
+                        legacy_app._reply(token, [legacy_app._text(
+                            "⚠️ 群組圖片掃描暫時無法開始，未更新牌路。"
+                        )])
                     continue
                 try:
                     reply = await asyncio.to_thread(handle_group_event, event)
