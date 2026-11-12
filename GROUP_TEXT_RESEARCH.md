@@ -4,11 +4,11 @@
 
 ## 安全設計
 
-- LINE Webhook `X-Line-Signature` 先由 `app.py` 驗證。禁止放寬 `ALLOW_UNSIGNED_WEBHOOK=0`。
+- LINE Webhook `X-Line-Signature` 先由 `line_group_webhook.py` 使用既有 `app.py` 的驗證函式檢查。禁止放寬 `ALLOW_UNSIGNED_WEBHOOK=0`。
 - **雙重白名單**：`GROUP_ADMIN_UIDS`（授權管理員 `U...`）及 `GROUP_ALLOWED_IDS`（允許群組 `C...`）都必須存在且符合，否則群組對話一律不觸發研究、也不回覆私有系統資料。LINE group webhook **不提供可靠的群組管理員角色布林值**；不可用暱稱或群組所有人身份猜測權限。
 - 取得 UID：管理員自行私訊 BOT `查詢UID`，將得到的 UID 安全地加入 Render `GROUP_ADMIN_UIDS`。
 - 首次取得群組 ID：先填 UID 白名單，把 BOT 邀進群組，授權 UID 在群組輸入 `查詢群組ID`；然後將回覆的 ID 加進 Render `GROUP_ALLOWED_IDS`。在填入群組 ID 前，其餘命令不會啟動。
-- 只處理 LINE `source.type=group`；`user` 的個人圖片掃描、會員、LIFF、銀行注碼資料完全走原路徑；未授權的群組訊息及多人的 `room` 事件都不會流入既有個人 UID 路徑。
+- 只處理 LINE `source.type=group`；`runtime_app.py` 安裝路由包裝器、`app.py` 保持原始 Git blob；`user` 的個人圖片掃描、會員、LIFF、銀行注碼資料完全走原路徑；未授權的群組訊息及多人的 `room` 事件都不會流入既有個人 UID 路徑。
 - 一群一筆持久化狀態。包含 B/P/T 序列、累計*管理員自行回報的模擬注數*、最後一次研究方向、最近的事件 ID、防重複結算、暫停旗標。用單獨 JSON 檔和 `os.replace` 原子寫入；**Render 必須有 Persistent Disk，並僅啟用一個實例／worker**，才能保障目前的單程序鎖。
 - 未驗證模型 **正式 action 必須為 `Skip`、`bankroll_fraction=0`、`validated_edge=false`**；任何變更立即失敗並且不更新群組歷史；管理員提供的紅／藍／和只視為結果記錄，並非真實牌面點數。原本 BBB 的 N/L/M、物理 EV、牌路 derived road、研究門檻不變。
 
@@ -54,8 +54,9 @@
 
 ## 測試、啟用與回滾
 
-- `python -m unittest -v test_group_text_research.py`：管理員 UID + 群組雙白名單、私聊/群組隔離、B/P/T、Kelly 限幅、ID 去重、多群組隔離、-30 注停用、變更正式 Skip 閘門直接拒絕、72 局上限。
+- `python -m unittest -v test_group_text_research.py test_line_group_webhook.py`：管理員 UID + 群組雙白名單、私聊/群組隔離、B/P/T、Kelly 限幅、ID 去重、多群組隔離、-30 注停用、變更正式 Skip 閘門直接拒絕、72 局上限。
 - `python -m unittest -v test_bbb_soft_shoe_ocr.py`：既有來源鎖定及 BBB/BGS 各歷史等價。既有整合 OCR 測試有獨立的 `bead_plate_hough_6row_v1` vs `v2_adaptive` 斷言差異，**本變更不得修改 OCR**。
+- 群組變更限制在 `group_text_research.py`、`line_group_webhook.py`、`runtime_app.py` 的最小安裝調整、測試、工作流程與說明文件；原本受保護的 `app.py`、OCR、LIFF 等檔案完全不變。
 - 變更僅限 `BGS-COPY.1`，原本 `BGS0.3V.1` 或 `BBB` 不會更改。
 - **GitHub main 更新不代表 Render 已經部署**：若該服務 Auto-Deploy Off，需手動 Deploy latest commit，先設白名單並檢查 `/prediction-version`、`/health`，再驗證 LINE Webhook、測試指令。
 - 一鍵停用此群組功能：Render 設 `GROUP_TEXT_ENABLED=0`，重新部署；個人聊天不受影響。完整程式回滾：使用 `backup/pre-group-text-20261113` 或 revert 本次 merge commit。
