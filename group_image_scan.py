@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -91,6 +92,7 @@ def finish_image(
     environ: Mapping[str, str] | None = None,
     state_path: Path | None = None,
     predictor=None,
+    cancel_event: threading.Event | None = None,
 ) -> str:
     """Accept a *fully reconstructed*, high-quality B/P/T screenshot snapshot.
 
@@ -99,6 +101,8 @@ def finish_image(
     hand outcomes; ask administrator to correct the shoe first.
     """
     env = os.environ if environ is None else environ
+    if cancel_event is not None and cancel_event.is_set():
+        return "⚠️ 群組圖片分析已逾時取消，未更新牌路。"
     if screen.get("recognition_quality_ok") is not True or screen.get("reconstructed_all") is not True:
         return (
             "⚠️ 圖片牌路辨識未達完整可信標準，未更新分析。\n"
@@ -131,6 +135,10 @@ def finish_image(
         # and no bankroll input. Compute before mutating the group ledger.
         direction, tier, report_text = group._research(
             history, group.analyze_history if predictor is None else predictor)
+        # asyncio.to_thread may continue after wait_for times out. Never
+        # commit stale OCR to disk after a timeout/cancellation.
+        if cancel_event is not None and cancel_event.is_set():
+            return "⚠️ 群組圖片分析已逾時取消，未更新牌路。"
         state["history"] = history
         state["last_research_direction"] = direction
         state["pending_tier"] = tier
@@ -154,16 +162,21 @@ async def scan_and_reply_group(legacy_app: Any, claim: Mapping[str, str]) -> Non
     tmp: Path | None = None
     prepared: Path | None = None
     group_id = str(claim["group_id"])
+    cancel_event = threading.Event()
     try:
         def compute() -> str:
             nonlocal tmp, prepared
             deadline = time.perf_counter() + 33.0
             tmp = legacy_app._download_line_image(str(claim["message_id"]))
             prepared = legacy_app._prepare_analysis_image(tmp)
-            screen = analyze_game_screen(prepared, existing_session={}, deadline=deadline)
-            return finish_image(claim, screen)
+            screen = analyze_game_screen(
+                prepared, existing_session={},
+                deadline=deadline, cancel_event=cancel_event,
+            )
+            return finish_image(claim, screen, cancel_event=cancel_event)
         result = await asyncio.wait_for(asyncio.to_thread(compute), timeout=43)
     except TimeoutError:
+        cancel_event.set()
         result = "⚠️ 群組圖片分析逾時，未確認新局數。請裁切完整牌路區域後重傳。"
     except Exception as exc:
         # Never leak API tokens or full traceback to a LINE group.
