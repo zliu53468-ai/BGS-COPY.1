@@ -212,18 +212,6 @@ function summarizeHypotheses(physics,_history,{samplesPerParticle=96}={}){
   const posteriorVariance=estimates.reduce((v,e,i)=>
     v+weights[i]*(e.gap-gap)**2,0);
   const mcStd=Math.sqrt(mcVariance),hypothesisSpread=Math.sqrt(posteriorVariance);
-  // The observed dispersion of per-particle means includes MC noise from
-  // samplesPerParticle independent next-hand draws. Remove its expected
-  // contribution BEFORE treating between-shoe dispersion as latent variation.
-  // For an exact one-score posterior with independent accepted particles,
-  // an estimator standard error combines weighted within-shoe MC variance
-  // with a between-particle mean variance (NOT the raw dispersion itself).
-  const expectedSamplingSpread=estimates.reduce((v,e,i)=>
-    v+weights[i]*(1-weights[i])*e.gap_variance/samplesPerParticle,0);
-  const latentBetweenVariance=Math.max(0,posteriorVariance-expectedSamplingSpread);
-  const weightSquareMass=weights.reduce((v,w)=>v+w*w,0);
-  const posteriorMeanSE=Math.sqrt(latentBetweenVariance*weightSquareMass);
-  const estimatorGapSE=Math.hypot(mcStd,posteriorMeanSE);
   // Both hands use the SAME posterior / next-deal samples as the existing EV.
   // These are model-based virtual lengths, NOT observed card counts.
   const drawLengthDiagnostics=drawLengthEligible?{
@@ -245,9 +233,6 @@ function summarizeHypotheses(physics,_history,{samplesPerParticle=96}={}){
     se_gap:Math.sqrt(mcVariance+posteriorVariance),
     mc_se_gap:mcStd,
     posterior_sd_gap:hypothesisSpread,
-    posterior_sd_gap_debiased:Math.sqrt(latentBetweenVariance),
-    posterior_mean_se_gap:posteriorMeanSE,
-    pf_estimator_se_gap:estimatorGapSE,
     draw_length_diagnostics:drawLengthDiagnostics,
     // Diagnostics only. MC interval conditions on the sampled hypothesis
     // mixture; it is NOT a calibrated confidence interval for real outcomes.
@@ -255,11 +240,6 @@ function summarizeHypotheses(physics,_history,{samplesPerParticle=96}={}){
       likelihood_method:"rao_blackwell_third_card_given_first_four",
       mc_gap_interval_95_conditional:[gap-1.96*mcStd,gap+1.96*mcStd],
       posterior_gap_dispersion_sd:hypothesisSpread,
-      posterior_gap_dispersion_sd_debiased:Math.sqrt(latentBetweenVariance),
-      expected_sampling_spread_variance:expectedSamplingSpread,
-      between_particle_mean_se:posteriorMeanSE,
-      combined_estimator_se:estimatorGapSE,
-      estimated_uncertainty_only:true,calibrated_confidence_interval:false,
       likelihood_relative_se:physics.lastLikelihoodRelativeSE??null,
       rejuvenated_transitions:physics.lastRejuvenated??0,
       rejuvenation_fallbacks:physics.lastRejuvenationFallbacks??0,
@@ -338,63 +318,6 @@ function earlyShoeGuard(physical,particles,rounds,{observed=false,
     ev_banker:evB,ev_player:evP,ev_gap:evB-evP,
     ev_gap_deviation:evB-evP-BASE_GAP,early_shoe_guard:diagnostics},
     gateAddition,diagnostics};
-}
-
-/**
- * V4 independent final-score: adaptively shrink hypothetical outcome
- * probabilities to the real eight-deck baseline, without using shoe progress.
- * The downstream V4 gate centers the EV signal on the same baseline; simulated
- * probabilities are never forced to 50/50.
- */
-function adaptiveScoreSmoother(physical,particles){
-  const p=physical?.simulated_probability;
-  if(!p||physical.simulation_exhausted||
-    ["B","P","T"].some(k=>!finite(p[k])))
-    throw Error("invalid_adaptive_score_input");
-  const n=Math.max(1,particles?.size||physical.particle_support||1);
-  const ess=clamp((physical.posterior_update_ess??n)/n,0,1);
-  const activeESS=clamp((physical.particle_ess??n)/n,0,1);
-  const diversity=clamp(Array.isArray(particles?.ancestorIds)?
-    new Set(particles.ancestorIds).size/n:1,0,1);
-  const likelihoodNoise=clamp(particles?.lastLikelihoodRelativeSE??0,0,1);
-  const quality=clamp((.5*ess+.25*activeESS+.25*diversity)/
-    (1+likelihoodNoise),0,1);
-  const mcNoise=finite(physical.mc_se_gap)?Math.max(0,physical.mc_se_gap):.05;
-  const posteriorSpread=finite(physical.posterior_sd_gap)?
-    Math.max(0,physical.posterior_sd_gap):.10;
-  const mcReliability=1/(1+mcNoise/.04);
-  const posteriorReliability=1/(1+posteriorSpread/.12);
-  const reliability=.65*mcReliability+.35*posteriorReliability;
-  const rawRelativeGap=1.95*p.B-2*p.P-BASE_GAP;
-  const uncertainty=Math.max(.002,Math.hypot(mcNoise,.12*posteriorSpread));
-  const evidenceStrength=Math.abs(rawRelativeGap)/
-    (Math.abs(rawRelativeGap)+uncertainty);
-  // One adaptive multiplier for both B/P; do not use the permanent rounds=1
-  // proxy or invent any observed ranks from the two final total scores.
-  const blend=clamp(.24+.72*quality*reliability*
-    (.72+.28*evidenceStrength),.24,.82);
-  const prob={
-    B:BASE.B+blend*(p.B-BASE.B),
-    P:BASE.P+blend*(p.P-BASE.P),
-    T:BASE.T+blend*(p.T-BASE.T)
-  };
-  const evB=.95*prob.B-prob.P,evP=prob.P-prob.B;
-  const diagnostics={
-    active:true,mode:"adaptive_score_evidence",
-    blend,prior_weight:1-blend,quality,
-    ess_ratio:ess,active_ess_ratio:activeESS,ancestor_diversity:diversity,
-    likelihood_relative_se:likelihoodNoise,mc_gap_se:mcNoise,
-    posterior_gap_spread:posteriorSpread,mc_reliability:mcReliability,
-    posterior_reliability:posteriorReliability,evidence_reliability:reliability,
-    relative_ev_signal_before_shrink:rawRelativeGap,
-    relative_ev_signal_after_shrink:evB-evP-BASE_GAP,
-    evidence_strength:evidenceStrength,history_progress_used:false,
-    probabilities_forced_balanced:false,validated_hit_rate:false
-  };
-  return{physical:{...physical,simulated_probability:prob,
-    ev_banker:evB,ev_player:evP,ev_gap:evB-evP,
-    ev_gap_deviation:evB-evP-BASE_GAP,
-    adaptive_score_smoothing:diagnostics},diagnostics,gateAddition:0};
 }
 
 function baselineResult(){
@@ -645,7 +568,7 @@ class PhysicsForecastFirstEngine{
   }
 }
 return{PhysicsForecastFirstEngine,observedCounts,observedHand,
-  deal,simulate,summarizeHypotheses,earlyShoeGuard,adaptiveScoreSmoother,
+  deal,simulate,summarizeHypotheses,earlyShoeGuard,
   decisionFromEV,weightedContext,
   BASE,BASE_EV,INITIAL,DECKS,VERSION,BASE_EV_GATE,OVERDRIVE_GATE,ONE_HAND_CUSHION};
 });
