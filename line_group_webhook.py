@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 
 from group_text_research import handle_group_event
 from group_image_scan import reserve_image, scan_and_reply_group
+from group_reply_ui import group_message
 
 
 def install_group_webhook(app, legacy_app) -> None:
@@ -85,18 +86,20 @@ def install_group_webhook(app, legacy_app) -> None:
                         if isinstance(image_claim, dict):
                             # Acknowledge in the SAME group, then perform OCR
                             # asynchronously and push ONLY to groupId.
-                            legacy_app._reply(token, [legacy_app._text(
-                                "📷 已收到群組牌路截圖，正在自動掃描大路／珠盤並分析；完成後會直接回覆本群組。"
+                            # LINE official loading animations are unsupported
+                            # in groups, so use a short progress reply instead.
+                            legacy_app._reply(token, [group_message(
+                                "⏳ 牌路掃描中，完成後直接回覆本群組。"
                             )])
                             legacy_app._schedule_background(
                                 scan_and_reply_group(legacy_app, image_claim)
                             )
                         elif isinstance(image_claim, str):
-                            legacy_app._reply(token, [legacy_app._text(image_claim)])
+                            legacy_app._reply(token, [group_message(image_claim)])
                     except Exception:
                         legacy_app.traceback.print_exc()
-                        legacy_app._reply(token, [legacy_app._text(
-                            "⚠️ 群組圖片掃描暫時無法開始，未更新牌路。"
+                        legacy_app._reply(token, [group_message(
+                            "⚠️ 無法開始掃描，牌路未更新。"
                         )])
                     continue
                 try:
@@ -105,7 +108,7 @@ def install_group_webhook(app, legacy_app) -> None:
                     legacy_app.traceback.print_exc()
                     reply = "⚠️ 群組研究指令處理失敗，本次沒有更新紀錄。"
                 if reply:
-                    legacy_app._reply(token, [legacy_app._text(reply)])
+                    legacy_app._reply(token, [group_message(reply)])
             elif is_uid_request(event):
                 uid = str(source.get("userId") or "").strip()
                 if uid:
