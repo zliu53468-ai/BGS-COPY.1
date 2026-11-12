@@ -1,0 +1,50 @@
+services:
+  - type: web
+    name: v5-1-6-500p-line-bot
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn runtime_app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    # Production follows main automatically. BBB Frozen Direct 32D Web Parity
+    # is the active decision core; OCR / screenshot recognition remain unchanged.
+    autoDeploy: true
+    disk:
+      name: bgs-runtime-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.11
+      - key: BGS_BUILD_LABEL
+        value: linucb-32d-bbb-web-parity-v10
+      - key: BGS_TARGET_HANDS_MIN
+        value: "50"
+      - key: BGS_TARGET_HANDS_MAX
+        value: "70"
+      - key: BGS_CUT_CARD_REMAINING
+        value: "70"
+      - key: LINE_CHANNEL_ACCESS_TOKEN
+        sync: false
+      - key: LINE_CHANNEL_SECRET
+        sync: false
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: ACTIVATION_CODES
+        sync: false
+      - key: ADMIN_LINE_ID
+        value: "@jins888"
+      - key: ADMIN_LINE_URL
+        value: https://line.me/R/ti/p/%40jins888
+      - key: TRIAL_MINUTES
+        value: "30"
+      - key: RESULT_DELIVERY_MODE
+        value: push
+      - key: APP_MAX_CONCURRENT_PREDICTIONS
+        value: "1"
+      - key: OCR_PRELOAD
+        value: "0"
+      - key: ALLOW_UNSIGNED_WEBHOOK
+        value: "0"
+      - key: SESSION_DATA_FILE
+        value: /var/data/sessions.json
