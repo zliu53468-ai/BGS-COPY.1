@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import group_text_research as group
+from group_reply_ui import group_message
 
 
 def _authorized(event: Mapping[str, Any], env: Mapping[str, str]) -> bool:
@@ -143,12 +144,9 @@ def finish_image(
         state["last_research_direction"] = direction
         state["pending_tier"] = tier
         group._save(path, data)
-        return (
-            f"📷 群組圖片掃描完成\n"
-            f"已辨識：{len(history)} 局｜本次新增：{len(history)-len(old)} 局\n"
-            f"{report_text}\n"
-            f"累計注數：{int(state.get('net_units', 0)):+d} 注｜-30 注暫停"
-        )
+        # The research result already includes the next hand number.
+        # Avoid duplicate OCR banners and the previous long ledger footer.
+        return report_text
 
 
 async def scan_and_reply_group(legacy_app: Any, claim: Mapping[str, str]) -> None:
@@ -189,5 +187,5 @@ async def scan_and_reply_group(legacy_app: Any, claim: Mapping[str, str]) -> Non
                     path.unlink(missing_ok=True)
                 except OSError:
                     pass
-    if not legacy_app._push(group_id, [legacy_app._text(result)], max_retries=1):
+    if not legacy_app._push(group_id, [group_message(result)], max_retries=1):
         print("group_image_delivery_failed", group_id[-8:])
