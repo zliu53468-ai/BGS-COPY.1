@@ -118,6 +118,7 @@ class WebhookRouteTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(self.stub.visits, [])
         self.assertEqual(self.stub.messages[0][1][0]["text"], "研究觀望")
+        self.assertIn("quickReply", self.stub.messages[0][1][0])
         handler.assert_called_once()
 
     def test_personal_non_uid_preserves_legacy_if_opted_in(self):
@@ -201,7 +202,8 @@ class WebhookRouteTests(unittest.TestCase):
         self.assertEqual(self.stub.visits, [])
         self.assertEqual(len(self.stub.messages), 1)
         self.assertEqual(self.stub.messages[0][0], "group-img")
-        self.assertIn("群組牌路截圖", self.stub.messages[0][1][0]["text"])
+        self.assertIn("牌路掃描中", self.stub.messages[0][1][0]["text"])
+        self.assertIn("quickReply", self.stub.messages[0][1][0])
         self.assertEqual(len(self.stub.scheduled), 1)
         reserve.assert_called_once()
 
