@@ -273,7 +273,7 @@ def handle_group_event(
                 state["paused"] = True
                 result = (
                     f"📉 本次模擬：{delta:+d} 注｜累計 {state['net_units']:+d} 注\n"
-                    f"🛑 累計達 {stop} 注，建議休息；已暫停後續研究。\n"
+                    f"🛑 累計達 {stop} 注，建議暫停休息；已暫停後續研究。\n"
                     "停止顯示新的研究配注；正式下注依舊 Skip。"
                 )
             else:
