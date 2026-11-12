@@ -18,6 +18,7 @@
 |---|---|---|
 | `GROUP_TEXT_ENABLED` | `1` | 建議明確設定。安全白名單為空時不啟用 |
 | `GROUP_ONLY_MODE` | `1` | **BGS-COPY.1 預設只回群組文字**；封鎖私人聊天室原本的預測面板與 OCR 回覆，但保留私訊 `查詢UID`；設 `0` 才恢復舊私人功能 |
+| `GROUP_IMAGE_SCAN_ENABLED` | `1` | 開啟**群組圖片上傳 OCR 辨識**（不使用舊個人面板）。只接受授權管理員在允許群組中的截圖 |
 | `GROUP_ADMIN_UID` | `U...` | **單一管理員**，只填一個經私訊查詢、核對過的 LINE UID；不要填 LINE Channel ID／Bot basic ID |
 | `GROUP_ADMIN_UIDS` | `U...,...` | 可選，額外多名管理員 UID；與 `GROUP_ADMIN_UID` 任選一種或合併使用 |
 | `GROUP_ALLOWED_IDS` | `C...,...` | 必填，逗號分隔核准 LINE 群組 ID |
@@ -33,6 +34,7 @@
 | 文字 | 行為 |
 |---|---|
 | `開始分析` | 新場次：清空此群組 B/P/T、模擬注數、暫停旗標；不用提供本金 |
+| 群組上傳 JPG/PNG 牌路截圖 | 透過原本的 `screen_pipeline.analyze_game_screen` 自動辨識完整 B/P/T 序列，再使用原本 Soft Shoe；**不需要本金、不轉私人面板**，結果只回原 LINE 群組 |
 | `紅`／`藍`／`和` | 分別記錄 B、P、T，使用**同一個** `bbb_soft_shoe_runtime.analyze_history` 計算研究方向及 ROAD_AUX，直接用 LINE **文字訊息**回覆，不開 LIFF 或 Flex 面板 |
 | `+5`／`-5`／`+10`／`-10`／`+20`／`-20` | 管理員記錄一次**模擬**盈虧，不會自動下注；累計到 −30 注即暫停 |
 | `+`／`-` | 對**上一筆**研究模擬級距記錄正／負結果；級距為 0 或已使用則須改輸入明確數字 |
@@ -72,3 +74,15 @@
 - `GROUP_ONLY_MODE=1` 預設關掉原有個人預測／圖片回覆路由，避免相同 Channel 的 BOT 從 `BGS-COPY.1` 再把群組結果發到管理員私聊；唯一保留個人私聊查詢 UID 功能。不改動 `app.py` 原始檔，若要回復個人功能，把該變數設為 `0` 再部署。
 - 群組回覆只使用 LINE 事件原始 `replyToken`，不使用 `push(userId)`；若仍出現私人推播，請檢查是否**其他 Render 舊服務**也使用同一 Channel access token，或使用者曾私訊其他預測機器人。兩個服務共用 Channel Token 時需要拆開／停用其中一個，避免雙重回覆。
 - **管理員啟用順序**：先私訊 `查詢UID`，Render 設 `GROUP_ADMIN_UID=U...`，讓該 UID 在群組輸入 `查詢群組ID`，將得到的 `C...` 填 `GROUP_ALLOWED_IDS`，部署後再以群組輸入 `開始分析`。沒有這兩項白名單時會靜默拒絕。
+
+## 群組圖片 OCR 版 V3（保留 Soft Shoe、不需要本金）
+
+1. 先設定 `GROUP_ONLY_MODE=1`、`GROUP_TEXT_ENABLED=1`、`GROUP_IMAGE_SCAN_ENABLED=1`、`GROUP_ADMIN_UID`（或 `GROUP_ADMIN_UIDS`）以及 `GROUP_ALLOWED_IDS`。要有 Render Persistent Disk（`GROUP_STATE_FILE` 建議 `/var/data/group_research_state.json`）。
+2. 在**已授權 LINE 群組**輸入 `開始分析`。這會開始新一靴，不要求館別、本金或個人會員授權。
+3. 管理員把**完整清晰的大路／珠盤路圖片**傳送到該群組；BOT 用圖片事件 messageId 下載內容，經既有 `_prepare_analysis_image` 和 `screen_pipeline.analyze_game_screen` 復原 B/P/T。收到時以原始群組 `replyToken` 回覆「圖片掃描中」，完成後使用 `_push(groupId)` 把結果送回**同一群組**，絕不 `push(userId)` 送私人聊天室。
+4. 模型只使用 OCR **可信的完整 B/P/T 歷史**，沒有額外真實牌值、剩餘牌數或 bankroll 參數。不更改 BBB engine、OCR implementation、原有私人 app.py 或正式 Skip / Kelly 安全閘門。模擬 5／10／20 注與先前群組文字規格相同。
+5. 新圖片與先前紀錄必須屬於同一靴，且**已記錄歷史必須是新 OCR 歷史的前綴**，只接受新增局數；重複截圖不重複記局。圖片品質不足／重建不完整／歷史不一致／超過 72 局都不更新模型紀錄。結束或重開分析後，過期圖片結果一律丟棄。
+6. LINE 重送同一 `webhookEventId` 不重複掃描。下載、掃描及模型推論在背景進行，OCR 出錯直接在群組提示重新上傳，不推私人面板，也不要求本金。
+7. `GROUP_IMAGE_SCAN_ENABLED=0` 可單獨停用群組圖片功能，保持文字群組模式不變。其他原本 Web / 私人圖片分析程式檔保留是為了舊路徑相容，**群組模式不會呼叫其本金設置流程**。
+
+**部署注意：** 修改 GitHub/main 不會讓既有 Auto-Deploy Off 的 Render 服務自動上線；需在正確服務手動部署最新 SHA。確認群組欄位與 Token/Secret 有效，且無其他舊版 Render 服務共用相同 LINE Channel，才可驗證實際使用者體驗。

@@ -13,6 +13,7 @@ import re
 import tempfile
 import threading
 import unicodedata
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -65,6 +66,7 @@ def _save(path: Path, data: dict[str, Any]) -> None:
 def _default() -> dict[str, Any]:
     return {
         "active": False, "paused": False, "history": [],
+        "run_id": uuid.uuid4().hex,
         "net_units": 0, "pending_tier": 0, "last_research_direction": "SKIP",
         "records": [], "processed": [],
     }
