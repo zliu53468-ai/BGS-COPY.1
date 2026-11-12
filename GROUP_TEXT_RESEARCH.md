@@ -5,9 +5,9 @@
 ## 安全設計
 
 - LINE Webhook `X-Line-Signature` 先由 `line_group_webhook.py` 使用既有 `app.py` 的驗證函式檢查。禁止放寬 `ALLOW_UNSIGNED_WEBHOOK=0`。
-- **雙重白名單**：`GROUP_ADMIN_UIDS`（授權管理員 `U...`）及 `GROUP_ALLOWED_IDS`（允許群組 `C...`）都必須存在且符合，否則群組對話一律不觸發研究、也不回覆私有系統資料。LINE group webhook **不提供可靠的群組管理員角色布林值**；不可用暱稱或群組所有人身份猜測權限。
-- 取得 UID：管理員自行私訊 BOT `查詢UID`，將得到的 UID 安全地加入 Render `GROUP_ADMIN_UIDS`。
-- 首次取得群組 ID：先填 UID 白名單，把 BOT 邀進群組，授權 UID 在群組輸入 `查詢群組ID`；然後將回覆的 ID 加進 Render `GROUP_ALLOWED_IDS`。在填入群組 ID 前，其餘命令不會啟動。
+- **雙重白名單**：`GROUP_ADMIN_UID`（單人）或 `GROUP_ADMIN_UIDS`（多人）與 `GROUP_ALLOWED_IDS`（允許群組 `C...`）都必須存在且符合，否則群組對話一律不觸發研究、也不回覆私有系統資料。LINE group webhook **不提供可靠的群組管理員角色布林值**；不可用暱稱或群組所有人身份猜測權限。
+- 取得 UID：管理員自行私訊 BOT `查詢UID`，將得到的 UID 安全地加入 Render `GROUP_ADMIN_UID`。**不要直接寫死在公開 GitHub 原始碼**；可以安全地更換管理員。
+- 首次取得群組 ID：先填 `GROUP_ADMIN_UID` 白名單，把 BOT 邀進群組，授權 UID 在群組輸入 `查詢群組ID`；然後將回覆的 ID 加進 Render `GROUP_ALLOWED_IDS`。在填入群組 ID 前，其餘命令不會啟動。
 - 只處理 LINE `source.type=group`；`runtime_app.py` 安裝路由包裝器、`app.py` 保持原始 Git blob；`user` 的個人圖片掃描、會員、LIFF、銀行注碼資料完全走原路徑；未授權的群組訊息及多人的 `room` 事件都不會流入既有個人 UID 路徑。
 - 一群一筆持久化狀態。包含 B/P/T 序列、累計*管理員自行回報的模擬注數*、最後一次研究方向、最近的事件 ID、防重複結算、暫停旗標。用單獨 JSON 檔和 `os.replace` 原子寫入；**Render 必須有 Persistent Disk，並僅啟用一個實例／worker**，才能保障目前的單程序鎖。
 - 未驗證模型 **正式 action 必須為 `Skip`、`bankroll_fraction=0`、`validated_edge=false`**；任何變更立即失敗並且不更新群組歷史；管理員提供的紅／藍／和只視為結果記錄，並非真實牌面點數。原本 BBB 的 N/L/M、物理 EV、牌路 derived road、研究門檻不變。
@@ -17,7 +17,9 @@
 | KEY | VALUE 範例 | 必要性 |
 |---|---|---|
 | `GROUP_TEXT_ENABLED` | `1` | 建議明確設定。安全白名單為空時不啟用 |
-| `GROUP_ADMIN_UIDS` | `U...,...` | 必填，逗號分隔授權管理員 UID |
+| `GROUP_ONLY_MODE` | `1` | **BGS-COPY.1 預設只回群組文字**；封鎖私人聊天室原本的預測面板與 OCR 回覆，但保留私訊 `查詢UID`；設 `0` 才恢復舊私人功能 |
+| `GROUP_ADMIN_UID` | `U...` | **單一管理員**，只填一個經私訊查詢、核對過的 LINE UID；不要填 LINE Channel ID／Bot basic ID |
+| `GROUP_ADMIN_UIDS` | `U...,...` | 可選，額外多名管理員 UID；與 `GROUP_ADMIN_UID` 任選一種或合併使用 |
 | `GROUP_ALLOWED_IDS` | `C...,...` | 必填，逗號分隔核准 LINE 群組 ID |
 | `GROUP_STOP_LOSS_UNITS` | `30` | 模擬注數累計到 −30（含）自動休息 |
 | `GROUP_STATE_FILE` | `/var/data/group_research_state.json` | 持久化磁碟；未設定時使用 `SESSION_DATA_FILE` 同資料夾 |
@@ -62,3 +64,11 @@
 - 一鍵停用此群組功能：Render 設 `GROUP_TEXT_ENABLED=0`，重新部署；個人聊天不受影響。完整程式回滾：使用 `backup/pre-group-text-20261113` 或 revert 本次 merge commit。
 
 請勿把此演算法當成「勝率保證」。管理員輸入的注數僅供手動記帳和風控展示，損益未經第三方核驗。
+
+## 群組文字回覆版 V2（BGS-COPY.1 專用）
+
+- 群組管理員輸入 `紅/藍/和` 後，只在原群組由該 webhook 事件的 **replyToken** 回覆，不以管理員 `userId` 推播私人面板。顯示 `本局結果`、`下一局研究：🔴 莊/🔵 閒/⚪ 觀望｜模擬 N 注`、`Kelly 模擬分級：0/5/10/20 注`、`牌路輔助` 及 `累計注數`。
+- 若 Soft Shoe 未有 eligible 正向研究訊號或凱利模擬級距不足 5 注，可能顯示 0 注；**不得為了固定輸出 5/10/20 而虛構正 EV 或改變研究方向**。
+- `GROUP_ONLY_MODE=1` 預設關掉原有個人預測／圖片回覆路由，避免相同 Channel 的 BOT 從 `BGS-COPY.1` 再把群組結果發到管理員私聊；唯一保留個人私聊查詢 UID 功能。不改動 `app.py` 原始檔，若要回復個人功能，把該變數設為 `0` 再部署。
+- 群組回覆只使用 LINE 事件原始 `replyToken`，不使用 `push(userId)`；若仍出現私人推播，請檢查是否**其他 Render 舊服務**也使用同一 Channel access token，或使用者曾私訊其他預測機器人。兩個服務共用 Channel Token 時需要拆開／停用其中一個，避免雙重回覆。
+- **管理員啟用順序**：先私訊 `查詢UID`，Render 設 `GROUP_ADMIN_UID=U...`，讓該 UID 在群組輸入 `查詢群組ID`，將得到的 `C...` 填 `GROUP_ALLOWED_IDS`，部署後再以群組輸入 `開始分析`。沒有這兩項白名單時會靜默拒絕。

@@ -3,6 +3,7 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import unittest
 from unittest.mock import patch
 
@@ -113,13 +114,24 @@ class WebhookRouteTests(unittest.TestCase):
         self.assertEqual(self.stub.messages[0][1][0]["text"], "研究觀望")
         handler.assert_called_once()
 
-    def test_personal_non_uid_preserves_legacy(self):
-        res = self.post([self.event({
-            "type": "user", "userId": "U-regular"
-        }, "t1", text="hello")])
+    def test_personal_non_uid_preserves_legacy_if_opted_in(self):
+        with patch.dict(os.environ, {"GROUP_ONLY_MODE": "0"}):
+            res = self.post([self.event({
+                "type": "user", "userId": "U-regular"
+            }, "t1", text="hello")])
         self.assertEqual(res.status_code, 200)
         self.assertEqual(len(self.stub.visits), 1)
         self.assertEqual(len(self.stub.visits[0]), 1)
+
+    def test_default_group_only_suppresses_private_prediction_callback(self):
+        with patch.dict(os.environ, {"GROUP_ONLY_MODE": "1"}):
+            res = self.post([self.event({
+                "type": "user", "userId": "U-regular"
+            }, "t2", text="開始分析")])
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(self.stub.visits, [])
+        self.assertEqual(self.stub.messages, [])
+
 
     def test_private_uid_request_never_reaches_legacy(self):
         res = self.post([self.event({
@@ -137,14 +149,35 @@ class WebhookRouteTests(unittest.TestCase):
             self.event({"type": "user", "userId": "U-personal"},
                        "personal", text="測試"),
         ]
-        with patch("line_group_webhook.handle_group_event",
-                   return_value="研究觀望") as handler:
-            res = self.post(events)
+        with patch.dict(os.environ, {"GROUP_ONLY_MODE": "0"}):
+            with patch("line_group_webhook.handle_group_event",
+                       return_value="研究觀望") as handler:
+                res = self.post(events)
         self.assertEqual(res.status_code, 200)
         self.assertEqual(len(self.stub.visits), 1)
         self.assertEqual(len(self.stub.visits[0]), 1)
         self.assertEqual(self.stub.visits[0][0]["replyToken"], "personal")
         self.assertEqual(len(self.stub.messages), 1)
+        handler.assert_called_once()
+
+    def test_default_group_only_mixed_batch_replies_to_group_only(self):
+        events = [
+            self.event({
+                "type": "group", "groupId": "C-good", "userId": "U-admin"
+            }, "group"),
+            self.event({"type": "user", "userId": "U-personal"},
+                       "personal", text="測試"),
+        ]
+        with patch.dict(os.environ, {"GROUP_ONLY_MODE": "1"}):
+            with patch("line_group_webhook.handle_group_event",
+                       return_value="下一局研究：🔴 莊｜5 注") as handler:
+                res = self.post(events)
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(self.stub.visits, [])
+        self.assertEqual(len(self.stub.messages), 1)
+        self.assertEqual(self.stub.messages[0][0], "group")
+        self.assertIn("下一局研究：🔴 莊｜5 注",
+                      self.stub.messages[0][1][0]["text"])
         handler.assert_called_once()
 
     def test_missing_user_id_group_cannot_respond(self):

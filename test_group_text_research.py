@@ -78,6 +78,18 @@ class GroupTextResearchTests(unittest.TestCase):
         self.assertIsNone(self.call("開始分析"))
         self.assertFalse(self.path.exists())
 
+    def test_single_admin_uid_env_alias_and_same_group_only(self):
+        self.env["GROUP_ADMIN_UIDS"] = ""
+        self.env["GROUP_ADMIN_UID"] = "U-admin-1"
+        self.assertIsNone(self.call("開始分析", uid="U-admin-2"))
+        self.assertIsNone(self.call("開始分析", group="C-unapproved"))
+        started = self.call("開始分析", uid="U-admin-1")
+        self.assertIn("已開始", started)
+        message = self.call("紅")
+        self.assertIn("下一局研究：🔴 莊｜5 注", message)
+        self.assertIn("累計注數：+0 注", message)
+        self.assertIn("正式決策：Skip／0 注", message)
+
     def test_start_outcomes_and_tie_are_group_only_and_skip(self):
         self.assertIn("已開始", self.call("開始分析"))
         msg = self.call("紅")

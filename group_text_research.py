@@ -124,12 +124,15 @@ def _research(history: list[str], predictor: Callable[[list[str]], Mapping[str, 
     tier, fractional = _kelly_simulation(report, direction)
     road_note = ("路同向" if view.get("road_confirmed") else
                  "路分歧" if view.get("road_conflict") else "牌路未確認")
+    headline = (
+        f"下一局研究：{SIDE_LABEL[direction]}｜{tier} 注"
+        if direction in ("B", "P") and tier else "下一局研究：⚪ 觀望｜0 注"
+    )
     msg = (
-        f"🧪 Soft Shoe 研究方向｜第 {len(history)} 局\n"
-        f"方向：{SIDE_LABEL[direction]}\n"
-        f"輔助圖案：{road_note}\n"
-        f"Kelly 模擬分級：{tier} 注（可用級距：5／10／20）\n"
-        f"模擬分數：{fractional * 100:.2f}%／100參考單位\n"
+        f"📊 AI 群組分析｜第 {len(history)} 局\n"
+        f"{headline}\n"
+        f"Kelly 模擬分級：{tier} 注（5／10／20）\n"
+        f"牌路輔助：{road_note}｜模擬尺度 {fractional * 100:.2f}%\n"
         "⚠️ 未驗證獲利優勢；非實際投注建議。\n"
         "正式決策：Skip／0 注"
     )
@@ -161,7 +164,14 @@ def handle_group_event(
     group_id = str(src.get("groupId") or "").strip()
     if not sender or not group_id:
         return None
-    if sender not in _allowed(str(env.get("GROUP_ADMIN_UIDS", ""))):
+    # A single administrator is configured with GROUP_ADMIN_UID, while
+    # GROUP_ADMIN_UIDS remains available for explicit additional admins.
+    # Never infer group admin privileges from LINE display name or @bot ID.
+    authorized_uids = (
+        _allowed(str(env.get("GROUP_ADMIN_UID", "")))
+        | _allowed(str(env.get("GROUP_ADMIN_UIDS", "")))
+    )
+    if sender not in authorized_uids:
         return None
     raw = unicodedata.normalize("NFKC", str(message.get("text") or "")).strip()
     if raw in ("查詢群組ID", "群組ID"):
@@ -209,9 +219,10 @@ def handle_group_event(
             state = groups[group_id]
             state["active"] = True
             result = (
-                "✅ 群組研究分析已開始；已重置本場歷史與模擬注數。\n"
-                "請管理員輸入「紅／藍／和」記錄實際結果。\n"
-                "無需輸入本金；正式下注仍為 Skip。"
+                "✅ 群組分析已開始｜累計 0 注\n"
+                "管理員輸入：紅＝莊、藍＝閒、和＝和局\n"
+                "回覆下一局研究方向＋Kelly 模擬 0／5／10／20 注。\n"
+                "免輸入本金｜正式下注維持 Skip。"
             )
         elif raw == "結束分析":
             state["active"] = False
@@ -238,9 +249,9 @@ def handle_group_event(
             state["last_research_direction"] = direction
             state["pending_tier"] = tier
             result = (
-                f"✅ 已記錄：{SIDE_LABEL[RESULTS[raw]]}\n"
+                f"本局結果：{SIDE_LABEL[RESULTS[raw]]}\n"
                 f"{analysis}\n"
-                f"累計模擬：{int(state.get('net_units', 0)):+d} 注"
+                f"累計注數：{int(state.get('net_units', 0)):+d} 注｜-30 注暫停"
             )
         else:
             # A bare +/- settles the last displayed simulated tier.
@@ -262,7 +273,7 @@ def handle_group_event(
                 state["paused"] = True
                 result = (
                     f"📉 本次模擬：{delta:+d} 注｜累計 {state['net_units']:+d} 注\n"
-                    f"🛑 已達 {stop} 注停損門檻，建議暫停休息。\n"
+                    f"🛑 累計達 {stop} 注，建議暫停休息；已暫停後續研究。\n"
                     "停止顯示新的研究配注；正式下注依舊 Skip。"
                 )
             else:
