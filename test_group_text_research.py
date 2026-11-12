@@ -86,21 +86,21 @@ class GroupTextResearchTests(unittest.TestCase):
         started = self.call("開始分析", uid="U-admin-1")
         self.assertIn("已開始", started)
         message = self.call("紅")
-        self.assertIn("第 2 局（下一局）", message)
-        self.assertIn("研究方向：🔴 莊", message)
-        self.assertIn("模擬配注：5 注", message)
-        self.assertIn("正式下注：Skip／0 注", message)
+        self.assertIn("第 2 局", message)
+        self.assertIn("推薦方向：🔴 莊", message)
+        self.assertIn("建議注數：5 注（模擬）", message)
+        self.assertEqual(len(message.splitlines()), 3)
         self.assertEqual(self.state()["net_units"], 0)
 
     def test_start_outcomes_and_tie_are_group_only_and_skip(self):
         self.assertIn("已開始", self.call("開始分析"))
         msg = self.call("紅")
-        self.assertIn("第 2 局（下一局）", msg)
-        self.assertIn("研究方向：🔴 莊", msg)
-        self.assertIn("模擬配注：5 注", msg)
-        self.assertIn("正式下注：Skip／0 注", msg)
-        self.assertIn("第 3 局（下一局）", self.call("藍"))
-        self.assertIn("第 4 局（下一局）", self.call("和"))
+        self.assertIn("第 2 局", msg)
+        self.assertIn("推薦方向：🔴 莊", msg)
+        self.assertIn("建議注數：5 注（模擬）", msg)
+        self.assertEqual(len(msg.splitlines()), 3)
+        self.assertIn("第 3 局", self.call("藍"))
+        self.assertIn("第 4 局", self.call("和"))
         self.assertEqual(self.state()["history"], ["B", "P", "T"])
         self.assertEqual(self.state()["net_units"], 0)
         self.assertEqual(self.histories, [
@@ -179,7 +179,7 @@ class GroupTextResearchTests(unittest.TestCase):
             self.event("紅"), environ=self.env,
             predictor=no_edge, state_path=self.path)
         self.assertIn("⚪ 觀望", result)
-        self.assertIn("模擬配注：0 注", result)
+        self.assertIn("建議注數：0 注（模擬）", result)
         self.assertEqual(self.state()["last_research_direction"], "SKIP")
 
     def test_kelly_calculation_floored_to_tiers(self):
@@ -253,10 +253,10 @@ class GroupTextResearchTests(unittest.TestCase):
         msg = handle_group_event(
             self.event("紅"), environ=self.env,
             predictor=low_tier, state_path=self.path)
-        self.assertIn("研究方向：🔴 莊", msg)
-        self.assertNotIn("研究方向：⚪ 觀望", msg)
-        self.assertIn("模擬配注：0 注", msg)
-        self.assertIn("正式下注：Skip／0 注", msg)
+        self.assertIn("推薦方向：🔴 莊", msg)
+        self.assertNotIn("推薦方向：⚪ 觀望", msg)
+        self.assertIn("建議注數：0 注（模擬）", msg)
+        self.assertEqual(len(msg.splitlines()), 3)
         self.assertEqual(self.state()["last_research_direction"], "B")
         self.assertEqual(self.state()["pending_tier"], 0)
 
@@ -274,10 +274,35 @@ class GroupTextResearchTests(unittest.TestCase):
         msg = handle_group_event(
             self.event("紅"), environ=self.env,
             predictor=uncertain, state_path=self.path)
-        self.assertIn("研究方向：⚪ 觀望", msg)
-        self.assertIn("觀望原因：莊閒 EV 差距不足", msg)
-        self.assertIn("模擬配注：0 注", msg)
+        self.assertIn("推薦方向：⚪ 觀望", msg)
+        self.assertEqual(len(msg.splitlines()), 3)
+        self.assertIn("建議注數：0 注（模擬）", msg)
         self.assertEqual(self.state()["last_research_direction"], "SKIP")
+
+    def test_real_bgs_adapter_research_group_direction_parity(self):
+        """Group must present the exact 58a24c5 BGS research direction."""
+        from bbb_soft_shoe_runtime import analyze_history, predict_screen
+        from group_text_research import _research
+
+        samples = [
+            ["B", "P", "T", "B", "P", "P", "B", "T", "B", "P", "B", "B"],
+            list("BBPPPTTBBPBPTPPBBTP"),
+        ]
+        for history in samples:
+            with self.subTest(history_len=len(history)):
+                report = analyze_history(history)
+                adapter = predict_screen(history)
+                direction, tier, message = _research(history, lambda _: report)
+                self.assertEqual(direction, adapter["bbb_soft_shoe"]["display_direction"])
+                self.assertEqual(direction, adapter["research_view"]["direction"])
+                self.assertEqual(len(message.splitlines()), 3)
+                self.assertIn(f"📊 第 {len(history) + 1} 局", message)
+                self.assertIn("推薦方向：", message)
+                self.assertIn("建議注數：", message)
+                self.assertIn(tier, (0, 5, 10, 20))
+                self.assertEqual(report["action"], "Skip")
+                self.assertEqual(report["bankroll_fraction"], 0)
+                self.assertIs(report["validated_edge"], False)
 
     def test_max_history_never_silently_truncated(self):
         self.call("開始分析")
