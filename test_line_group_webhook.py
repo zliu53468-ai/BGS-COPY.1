@@ -20,6 +20,7 @@ class LegacyStub:
     def __init__(self):
         self.messages = []
         self.visits = []
+        self.scheduled = []
         import traceback
         self.traceback = traceback
 
@@ -37,6 +38,11 @@ class LegacyStub:
     def _reply(self, token, messages):
         self.messages.append((token, messages))
         return True
+
+    def _schedule_background(self, coroutine):
+        # Test without running a real OCR/background task.
+        self.scheduled.append(coroutine)
+        coroutine.close()
 
     async def webhook(self, request):
         body = await request.body()
@@ -179,6 +185,37 @@ class WebhookRouteTests(unittest.TestCase):
         self.assertIn("下一局研究：🔴 莊｜5 注",
                       self.stub.messages[0][1][0]["text"])
         handler.assert_called_once()
+
+    def test_group_image_ack_is_group_reply_not_private_legacy_panel(self):
+        event = self.event({
+            "type": "group", "groupId": "C-ocr", "userId": "U-admin"
+        }, "group-img")
+        event["message"] = {"type": "image", "id": "img-123"}
+        claim = {
+            "group_id": "C-ocr", "message_id": "img-123",
+            "event_id": "group-img", "run_id": "r1",
+        }
+        with patch("line_group_webhook.reserve_image", return_value=claim) as reserve:
+            res = self.post([event])
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(self.stub.visits, [])
+        self.assertEqual(len(self.stub.messages), 1)
+        self.assertEqual(self.stub.messages[0][0], "group-img")
+        self.assertIn("群組牌路截圖", self.stub.messages[0][1][0]["text"])
+        self.assertEqual(len(self.stub.scheduled), 1)
+        reserve.assert_called_once()
+
+    def test_unknown_group_image_is_not_acknowledged_or_processed(self):
+        event = self.event({
+            "type": "group", "groupId": "C-unknown", "userId": "U-other"
+        }, "unauthorized-image")
+        event["message"] = {"type": "image", "id": "img-124"}
+        with patch("line_group_webhook.reserve_image", return_value=None):
+            res = self.post([event])
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(self.stub.messages, [])
+        self.assertEqual(self.stub.scheduled, [])
+        self.assertEqual(self.stub.visits, [])
 
     def test_missing_user_id_group_cannot_respond(self):
         with patch("line_group_webhook.handle_group_event") as handler:
