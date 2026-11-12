@@ -1,0 +1,32 @@
+name: Mirror pinned BGS source into COPY staging branch
+on:
+  push:
+    branches:
+      - sync/bgs-exact-mirror-20261113
+permissions:
+  contents: write
+jobs:
+  mirror:
+    if: github.repository == 'zliu53468-ai/BGS-COPY.1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Import and verify exact source Git tree without changing original BGS
+        shell: bash
+        run: |
+          set -euo pipefail
+          SOURCE_COMMIT=3b52be56191f1c4397e448455af36d05c63e12f5
+          SOURCE_TREE=9ca5754286d1ce9dae902add77ff9f242ac5af26
+          TARGET_BRANCH=sync/bgs-exact-mirror-20261113
+          git fetch --no-tags --depth=1 https://github.com/zliu53468-ai/BGS0.3V.1.git "$SOURCE_COMMIT"
+          test "$(git rev-parse FETCH_HEAD)" = "$SOURCE_COMMIT"
+          test "$(git rev-parse "$SOURCE_COMMIT^{tree}")" = "$SOURCE_TREE"
+          git read-tree --reset "$SOURCE_TREE"
+          test "$(git write-tree)" = "$SOURCE_TREE"
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'mirror: exact BGS0.3V.1 source tree at 3b52be5'
+          git push origin "HEAD:refs/heads/$TARGET_BRANCH"
+          echo "SOURCE_COMMIT=$SOURCE_COMMIT"
+          echo "TARGET_TREE=$(git rev-parse HEAD^{tree})"
