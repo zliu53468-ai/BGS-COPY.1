@@ -72,6 +72,17 @@ def _default() -> dict[str, Any]:
     }
 
 
+def _fresh_session(old: Mapping[str, Any]) -> dict[str, Any]:
+    """Erase shoe/ledger data and rotate run_id, retaining only event de-dupe IDs.
+
+    Processed webhook identifiers are not game history or betting records.
+    Keeping a bounded set prevents LINE retries from replaying prior commands.
+    """
+    clean = _default()
+    clean["processed"] = list(old.get("processed") or [])[-MAX_EVENTS:]
+    return clean
+
+
 def _status(state: Mapping[str, Any], stop: int) -> str:
     flag = "🛑 暫停休息" if state.get("paused") else (
         "✅ 分析中" if state.get("active") else "⏹ 已結束")
@@ -117,6 +128,9 @@ def _research(history: list[str], predictor: Callable[[list[str]], Mapping[str, 
         report.get("bankroll_fraction") != 0):
         raise RuntimeError("安全鎖定：BBB 正式下注閘門與研究版本不一致")
     view = report.get("research_view") or {}
+    # Research direction is NOT the Kelly stake tier. Previously, an
+    # eligible B/P direction was hidden as "觀望" whenever rounded Kelly <5.
+    # Preserve BBB's research gate exactly and only fix the presentation.
     direction = str(view.get("direction") or "SKIP")
     if direction not in ("B", "P") or view.get("eligible") is not True:
         direction = "SKIP"
@@ -126,13 +140,43 @@ def _research(history: list[str], predictor: Callable[[list[str]], Mapping[str, 
     tier, fractional = _kelly_simulation(report, direction)
     road_note = ("路同向" if view.get("road_confirmed") else
                  "路分歧" if view.get("road_conflict") else "牌路未確認")
-    headline = (
-        f"下一局研究：{SIDE_LABEL[direction]}｜{tier} 注"
-        if direction in ("B", "P") and tier else "下一局研究：⚪ 觀望｜0 注"
-    )
+    # Neither a low simulated stake nor an absent positive bankroll
+    # fraction is a reason to re-label a valid *research* direction.
+    # A true research Skip must remain Skip; explain why rather than
+    # silently over-promising a positive-EV recommendation.
+    if direction in ("B", "P"):
+        headline = f"下一局研究：{SIDE_LABEL[direction]}｜{tier} 注"
+        detail = ("配注備註：模擬 Kelly 級距不足 5 注，故顯示 0 注。"
+                  if tier == 0 else "研究門檻：通過（僅研究方向）")
+    else:
+        headline = "下一局研究：⚪ 觀望｜0 注"
+        labels = {
+            "insufficient_rounds": "牌局樣本不足",
+            "weak_ev_separation": "莊閒估計 EV 差距不足",
+            "high_estimator_uncertainty": "估計標準誤偏高",
+            "low_gap_to_noise": "方向差距低於抽樣噪音",
+            "low_particle_ess": "粒子有效樣本不足",
+            "low_particle_diversity": "粒子多樣性不足",
+            "physical_simulation_unavailable": "物理模擬未能完成",
+        }
+        raw_reasons = list(view.get("reasons") or [])
+        if not raw_reasons and view.get("reason"):
+            raw_reasons = [str(view["reason"])]
+        if not raw_reasons and report.get("reason"):
+            raw_reasons = [str(report["reason"])]
+        reason_str = "、".join(
+            labels.get(str(code), str(code)) for code in raw_reasons[:3]
+        ) or "本局沒有通過研究方向門檻"
+        candidate = str(view.get("candidate") or report.get("candidate") or "")
+        reference = (
+            f"\n模型候選：{SIDE_LABEL[candidate]}（未通過研究門檻，不能當作建議）"
+            if candidate in ("B", "P") else ""
+        )
+        detail = f"觀望原因：{reason_str}{reference}"
     msg = (
         f"📊 AI 群組分析｜第 {len(history)} 局\n"
         f"{headline}\n"
+        f"{detail}\n"
         f"Kelly 模擬分級：{tier} 注（5／10／20）\n"
         f"牌路輔助：{road_note}｜模擬尺度 {fractional * 100:.2f}%\n"
         "⚠️ 未驗證獲利優勢；非實際投注建議。\n"
@@ -213,12 +257,12 @@ def handle_group_event(
                 "+5、-5、+10、-10、+20、-20：手動注數結果\n"
                 "+／-：套用上一筆 Kelly 模擬分級\n"
                 "休息：主動暫停；達 -30 注自動休息\n"
+                "「結束分析」會清空本場牌路、模擬注數及待結算紀錄\n"
                 "開啟新場次請輸入「開始分析」\n"
                 "所有下注級距僅為研究模擬，正式 Skip。"
             )
         if raw == "開始分析":
-            groups[group_id] = _default()
-            state = groups[group_id]
+            state = groups[group_id] = _fresh_session(state)
             state["active"] = True
             result = (
                 "✅ 群組分析已開始｜累計 0 注\n"
@@ -227,9 +271,16 @@ def handle_group_event(
                 "免輸入本金｜正式下注維持 Skip。"
             )
         elif raw == "結束分析":
-            state["active"] = False
-            state["pending_tier"] = 0
-            result = "⏹ 群組分析已結束。\n" + _status(state, stop)
+            # Explicitly delete all per-shoe B/P/T history, manual P&L logs,
+            # simulated tiers and stop state. A fresh run_id invalidates any
+            # screenshot OCR worker that was still processing the prior shoe.
+            state = groups[group_id] = _fresh_session(state)
+            result = (
+                "⏹ 群組分析已結束。\n"
+                "🧹 本場牌路、模擬注數、待結算紀錄及暫停狀態已清空。\n"
+                "下次請輸入「開始分析」重新建立新一靴。\n"
+                + _status(state, stop)
+            )
         elif raw in ("休息", "暫停分析"):
             state["paused"] = True
             state["pending_tier"] = 0
