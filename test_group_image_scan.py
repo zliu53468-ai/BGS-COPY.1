@@ -95,11 +95,10 @@ class GroupOCRTests(unittest.TestCase):
         claim = self.claim(first)
         history = ["B", "P", "T", "B", "B", "P", "T", "P"]
         result = self.done(claim, self.screen(history))
-        self.assertIn("📷 群組圖片掃描完成", result)
-        self.assertIn("已辨識：8 局", result)
-        self.assertIn("本次新增：8 局", result)
-        self.assertIn("下一局研究：🔴 莊｜5 注", result)
-        self.assertIn("正式決策：Skip／0 注", result)
+        self.assertIn("第 9 局（下一局）", result)
+        self.assertIn("研究方向：🔴 莊", result)
+        self.assertIn("模擬配注：5 注", result)
+        self.assertIn("正式下注：Skip／0 注", result)
         self.assertEqual(self.state()["history"], history)
         self.assertEqual(self.state()["net_units"], 0)
         self.assertNotIn("bankroll", self.state())
@@ -108,7 +107,7 @@ class GroupOCRTests(unittest.TestCase):
         self.assertEqual(len(self.predicted), 1)
         more = self.claim(self.image(event_id="img-c"))
         extended = history + ["B", "P"]
-        self.assertIn("本次新增：2 局", self.done(more, self.screen(extended)))
+        self.assertIn("第 11 局（下一局）", self.done(more, self.screen(extended)))
         self.assertEqual(self.state()["history"], extended)
 
     def test_unsafe_or_incomplete_images_never_update_history(self):
@@ -219,6 +218,8 @@ class GroupOCRTests(unittest.TestCase):
         self.assertEqual(fake.sent[0][0], "C-good")
         self.assertNotEqual(fake.sent[0][0], "U-abc")
         self.assertIn("群組 OCR", fake.sent[0][1][0]["text"])
+        self.assertIn("quickReply", fake.sent[0][1][0])
+        self.assertLessEqual(len(fake.sent[0][1][0]["quickReply"]["items"]), 13)
         finish.assert_called_once()
 
 
