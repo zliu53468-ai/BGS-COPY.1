@@ -109,3 +109,13 @@
 - 識別下一局：圖片或手動輸入已確認 `history.length=N` 局，群組顯示 **第 N+1 局（下一局）**，並只列 `研究方向：莊／閒／觀望`、`模擬配注：0／5／10／20 注`、`正式下注：Skip／0 注`。真正觀望時，額外只顯示最主要的原因。未過門檻時不能硬給方向；Kelly 不足 5 注時顯示原研究方向但配注 0 注。
 - 此精簡訊息省略冗長技術及重複 OCR/統計敘述；原群組 `查詢狀態`、管理員累計 -30 注休息、`結束分析` 清除歷史等功能不變。
 - 回滾：比對 `backup/pre-group-quickreply-20261113`；可 revert 本次 PR 合併提交。若 Render Auto-Deploy 關閉，需要手動部署最新 main SHA。
+
+
+## 2026-11-13：完全對齊 BGS 58a24c5 的群組三行回覆
+
+- GROUP 版核心檔、Node worker、Python adapter、ROAD_AUX 已在 PR #7 與 BGS0.3V.1/main（`58a24c527226efe5a6f156f6c81b1cb6c2ad71c6`）來源雜湊完全相同，N/L/M 固定 448/80/128；本次**不修改**上述核心及 BGS/BBB 倉庫。
+- 群組僅顯示 **三行**：`📊 第 N 局`、`推薦方向：🔴 莊／🔵 閒／⚪ 觀望`、`建議注數：0／5／10／20 注（模擬）`。N 為下一局（已辨識歷史數 + 1）；不再另外顯示正式下注 Skip、安全說明或技術原因，這些規則仍存在於內部程式和此文件。
+- 莊／閒嚴格依 BGS 原本 `research_view.direction` 與 `eligible`；未通過研究門檻時仍是觀望／0 注，**不會為了顯示方向而採用未過門檻的候選值**。正式下注強制 Skip／0，僅屬模擬配注，不能當作勝率保證。
+- 每次模型回覆（包含圖片 OCR 路徑）在 Render Logs 以 `group_research_gate` 記錄已完成局數、模型版本、研究方向、eligible、研究門檻原因與模擬級距，**不包含 UID、群組 ID、牌路全文或圖片**；可設 `GROUP_RESEARCH_GATE_LOG=0` 關閉。
+- 如果畫面持續觀望，先確認 Render 執行 COPY 最新提交；再依 Logs 的 `reason` 判別是否是 BGS 原版的 `insufficient_rounds`、`weak_ev_separation`、`low_gap_to_noise` 等門檻生效。原版設定 `MIN_DIRECTION_ROUNDS=3`：只有 0–2 局時觀望是預期結果。不能靠版本字串或直接放寬 gate 保證出方向。
+- OCR、群組 UID / Group ACL、快捷按鈕、結束清除、模擬注數計算均不變。原始 BGS 與 BBB main 未修改。
