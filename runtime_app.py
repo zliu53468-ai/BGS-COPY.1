@@ -281,6 +281,10 @@ _ORIGINAL_SCREEN_RESULT_PANEL = legacy_app.screen_result_panel
 legacy_app.screen_result_panel = _fixed_forecast_panel
 app = legacy_app.app
 
+# Only the runtime entrypoint routes group chat text; legacy app.py stays intact.
+from line_group_webhook import install_group_webhook
+install_group_webhook(app, legacy_app)
+
 __all__ = ["app"]
 
 
