@@ -12,7 +12,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from group_text_research import (
-    VERSION, _kelly_simulation, handle_group_event,
+    VERSION, GROUP_GATE_OVERRIDES, _group_display_view, _kelly_simulation,
+    _research, handle_group_event,
 )
 
 
@@ -345,8 +346,8 @@ class GroupTextResearchTests(unittest.TestCase):
         self.assertIn("建議注數：0 注（模擬）", msg)
         self.assertEqual(self.state()["last_research_direction"], "SKIP")
 
-    def test_real_bgs_adapter_research_group_direction_parity(self):
-        """Group must present the exact 58a24c5 BGS research direction."""
+    def test_real_bgs_adapter_preserves_existing_nonborderline_directions(self):
+        """The moderate group policy leaves established BGS directions intact."""
         from bbb_soft_shoe_runtime import analyze_history, predict_screen
         from group_text_research import _research
 
@@ -416,12 +417,110 @@ class GroupTextResearchTests(unittest.TestCase):
                 for key, value in record["gate_metrics"].items():
                     self.assertEqual(value, report["research_view"][key])
                 for key, value in record["gate_thresholds"].items():
+                    self.assertEqual(value, GROUP_GATE_OVERRIDES.get(key, report["config"][key]))
+                for key, value in record["core_gate_thresholds"].items():
                     self.assertEqual(value, report["config"][key])
                 self.assertNotIn("do-not-log", payload)
                 self.assertNotIn('"history"', payload)
                 self.assertEqual(report["action"], "Skip")
                 self.assertEqual(report["bankroll_fraction"], 0)
                 self.assertFalse(report["validated_edge"])
+
+
+class GroupModerateGateTests(unittest.TestCase):
+    def report(self):
+        return {
+            "version": VERSION, "action": "Skip", "bankroll_fraction": 0,
+            "validated_edge": False, "observations": 24, "candidate": "B",
+            "probabilities": {"B": .46, "P": .444, "T": .096},
+            "road_aux": {"validated_betting_edge": False},
+            "config": {
+                "RESEARCH_DIRECTION_RELAXED": True, "MIN_DIRECTION_ROUNDS": 3,
+                "MIN_DIRECTION_EV_GAP": .010, "MIN_DIRECTION_GAP_SNR": 1.05,
+                "MIN_DIRECTION_ESS_RATIO": .40, "MIN_DIRECTION_DIVERSITY": .25,
+                "MAX_DIRECTION_GAP_SE": .070,
+            },
+            "research_view": {
+                "direction": "SKIP", "candidate": "B", "eligible": False,
+                "reason": "weak_ev_separation",
+                "reasons": ["weak_ev_separation", "low_gap_to_noise"],
+                "abs_ev_gap": .009, "ev_gap_snr": 1.02, "ev_gap_se": .009 / 1.02,
+                "ess_ratio": .8, "ancestor_diversity": .8,
+            },
+        }
+
+    def test_borderline_group_direction_and_units_preserve_full_core_report(self):
+        report = self.report()
+        original = copy.deepcopy(report)
+        output = io.StringIO()
+        with patch.dict(os.environ, {"GROUP_RESEARCH_GATE_LOG": "1"}), redirect_stdout(output):
+            direction, tier, message = _research(["B"] * 24, lambda _: report)
+        self.assertEqual((direction, tier), ("B", 5))
+        self.assertIn("固定最低級距", message)
+        self.assertEqual(report, original)
+        record = json.loads(output.getvalue().split(" ", 1)[1])
+        self.assertEqual(record["core_research_direction"], "SKIP")
+        self.assertEqual(record["research_direction"], "B")
+        self.assertEqual(record["core_reasons"], original["research_view"]["reasons"])
+        self.assertEqual(record["reasons"], [])
+
+    def test_both_threshold_boundaries_are_required(self):
+        for gap, snr, expected in ((.008, 1., "B"), (.007999, 1.1, "SKIP"),
+                                   (.009, .999, "SKIP")):
+            with self.subTest(gap=gap, snr=snr):
+                report = self.report()
+                report["research_view"].update(abs_ev_gap=gap, ev_gap_snr=snr)
+                view, _ = _group_display_view(report, 24)
+                self.assertEqual(view["direction"], expected)
+                if gap >= .008 and snr < 1:
+                    self.assertEqual(view["reasons"], ["low_gap_to_noise"])
+
+    def test_existing_quality_guards_cannot_be_bypassed(self):
+        for key, value in (("ev_gap_se", 0), ("ev_gap_se", .070001),
+                           ("ess_ratio", .3999), ("ancestor_diversity", .2499),
+                           ("ev_gap_snr", float("nan")), ("abs_ev_gap", None),
+                           ("ev_gap_se", float("inf"))):
+            with self.subTest(key=key, value=value):
+                report = self.report()
+                report["research_view"][key] = value
+                self.assertEqual(_group_display_view(report, 24)[0]["direction"], "SKIP")
+        for hands in (0, 1, 2):
+            report = self.report()
+            report["observations"] = hands
+            self.assertEqual(_group_display_view(report, hands)[0]["direction"], "SKIP")
+
+    def test_incomplete_unknown_or_inconsistent_reports_keep_skip(self):
+        for case in ("unknown", "missing_reasons", "missing_config", "strict",
+                     "candidate_mismatch", "history_mismatch", "invalid_reason"):
+            with self.subTest(case=case):
+                report = self.report()
+                if case == "unknown":
+                    report["research_view"]["reasons"].append("future_guard")
+                elif case == "missing_reasons":
+                    report["research_view"].pop("reasons")
+                elif case == "missing_config":
+                    report.pop("config")
+                elif case == "strict":
+                    report["config"]["RESEARCH_DIRECTION_RELAXED"] = False
+                elif case == "candidate_mismatch":
+                    report["candidate"] = "P"
+                elif case == "history_mismatch":
+                    report["observations"] = 23
+                else:
+                    report["research_view"]["reasons"] = [[]]
+                self.assertEqual(_group_display_view(report, 24)[0]["direction"], "SKIP")
+
+    def test_real_borderline_fixture_changes_group_only(self):
+        from bbb_soft_shoe_runtime import analyze_history, predict_screen
+        history = list("BPBPBBBBBBBBPPPPPTTPPPBP")
+        report = analyze_history(history)
+        original = copy.deepcopy(report)
+        self.assertEqual(report["research_view"]["direction"], "SKIP")
+        direction, tier, _ = _research(history, lambda _: report)
+        self.assertEqual(direction, report["candidate"])
+        self.assertEqual(tier, 5)
+        self.assertEqual(report, original)
+        self.assertEqual(predict_screen(history)["research_view"]["direction"], "SKIP")
 
 
 if __name__ == "__main__":

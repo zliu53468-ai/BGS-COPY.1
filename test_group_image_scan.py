@@ -224,7 +224,8 @@ class GroupOCRTests(unittest.TestCase):
 
     def test_real_manual_and_screenshot_histories_have_identical_next_forecast(self):
         self.env["GROUP_ALLOWED_IDS"] = "C-good,C-manual"
-        for history in (list("BBB"), list("BBBBBBBB")):
+        for history in (list("BBB"), list("BBBBBBBB"),
+                        list("BPBPBBBBBBBBPPPPPTTPPPBP")):
             with self.subTest(hands=len(history)):
                 self.start()
                 claim = self.claim(self.image())

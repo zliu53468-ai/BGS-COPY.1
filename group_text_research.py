@@ -29,6 +29,15 @@ RESULT_ALIASES = {
 SIDE_LABEL = {"B": "🔴 莊", "P": "🔵 閒", "T": "🟢 和", "SKIP": "⚪ 觀望"}
 ALLOWED_UNITS = (5, 10, 20)
 MAX_EVENTS = 200
+GROUP_GATE_POLICY = "COPY_GROUP_MODERATE_V1"
+GROUP_GATE_OVERRIDES = {
+    "MIN_DIRECTION_EV_GAP": .008,
+    "MIN_DIRECTION_GAP_SNR": 1.00,
+}
+GATE_KEYS = (
+    "MIN_DIRECTION_ROUNDS", "MIN_DIRECTION_EV_GAP", "MIN_DIRECTION_GAP_SNR",
+    "MIN_DIRECTION_ESS_RATIO", "MIN_DIRECTION_DIVERSITY", "MAX_DIRECTION_GAP_SE",
+)
 
 
 def _allowed(raw: str) -> set[str]:
@@ -127,15 +136,70 @@ def _kelly_simulation(report: Mapping[str, Any], side: str) -> tuple[int, float]
     return tier, fractional
 
 
+def _group_display_view(report: Mapping[str, Any], hands: int) -> tuple[dict, dict]:
+    """Relax two group DISPLAY thresholds, without modifying the core report.
+
+    Only a fully diagnosed borderline SKIP can be promoted to the core's own
+    candidate. Missing metrics, unknown reasons and every other guard retain
+    SKIP. Text and screenshots share this policy; private predictions do not.
+    """
+    view = dict(report.get("research_view") or {})
+    cfg = report.get("config") or {}
+    thresholds = {key: cfg.get(key) for key in GATE_KEYS}
+
+    def finite(value):
+        return type(value) in (int, float) and math.isfinite(value)
+
+    if (cfg.get("RESEARCH_DIRECTION_RELAXED") is not True
+            or not all(finite(value) for value in thresholds.values())
+            or thresholds["MIN_DIRECTION_ROUNDS"] < 3):
+        return view, thresholds
+    thresholds.update({key: min(value, thresholds[key])
+                       for key, value in GROUP_GATE_OVERRIDES.items()})
+    if view.get("direction") != "SKIP" or view.get("eligible") is not False:
+        return view, thresholds
+    reasons = view.get("reasons")
+    relaxable = {"weak_ev_separation", "low_gap_to_noise"}
+    if (not isinstance(reasons, list) or not reasons
+            or not all(isinstance(reason, str) and reason in relaxable for reason in reasons)
+            or (view.get("reason") and
+                (not isinstance(view["reason"], str) or view["reason"] not in relaxable))):
+        return view, thresholds
+    candidate = view.get("candidate")
+    metrics = [view.get(key) for key in (
+        "abs_ev_gap", "ev_gap_snr", "ev_gap_se", "ess_ratio", "ancestor_diversity",
+    )]
+    if (candidate not in ("B", "P") or candidate != report.get("candidate")
+            or report.get("observations") != hands
+            or hands < thresholds["MIN_DIRECTION_ROUNDS"]
+            or not all(finite(value) for value in metrics)):
+        return view, thresholds
+    gap, snr, se, ess, diversity = metrics
+    remaining = []
+    if gap < thresholds["MIN_DIRECTION_EV_GAP"]:
+        remaining.append("weak_ev_separation")
+    if not 0 < se <= thresholds["MAX_DIRECTION_GAP_SE"]:
+        remaining.append("high_estimator_uncertainty")
+    if snr < thresholds["MIN_DIRECTION_GAP_SNR"]:
+        remaining.append("low_gap_to_noise")
+    if not thresholds["MIN_DIRECTION_ESS_RATIO"] <= ess <= 1:
+        remaining.append("low_particle_ess")
+    if not thresholds["MIN_DIRECTION_DIVERSITY"] <= diversity <= 1:
+        remaining.append("low_particle_diversity")
+    view.update(direction="SKIP" if remaining else candidate, eligible=not remaining,
+                reason=remaining[0] if remaining else "group_moderate_gate_pass",
+                reasons=remaining)
+    return view, thresholds
+
+
 def _research(history: list[str], predictor: Callable[[list[str]], Mapping[str, Any]]) -> tuple[str, int, str]:
     report = predictor(history)
     if (report.get("version") != VERSION or report.get("action") != "Skip" or
         report.get("validated_edge") is not False or
         report.get("bankroll_fraction") != 0):
         raise RuntimeError("安全鎖定：BBB 正式下注閘門與研究版本不一致")
-    view = report.get("research_view") or {}
-    # 與私人 Soft Shoe 路徑對齊：只看 research_view.direction，
-    # 不再強制要求 eligible=True，避免群組過度觀望。
+    core_view = report.get("research_view") or {}
+    view, thresholds = _group_display_view(report, len(history))
     direction = str(view.get("direction") or "SKIP")
     if direction not in ("B", "P"):
         direction = "SKIP"
@@ -153,28 +217,29 @@ def _research(history: list[str], predictor: Callable[[list[str]], Mapping[str, 
     # and formal wager gate. A true SKIP always retains zero units.
     tier = max(ALLOWED_UNITS[0], kelly_tier) if direction in ("B", "P") else 0
     fixed_minimum = tier > kelly_tier
-    # Match the exact BGS LINE Soft Shoe research direction. No local
-    # probability smoothing, threshold override, or candidate->bet fallback.
+    # Keep core forecasts and the formal wager gate intact. The group-only
+    # display policy is logged separately from the original research decision.
     # This diagnostic logs NO chat ID, UID, screenshot, or personal history.
     if str(os.getenv("GROUP_RESEARCH_GATE_LOG", "1")).strip() == "1":
         print("group_research_gate", json.dumps({
             "repository_commit": os.getenv("RENDER_GIT_COMMIT", "").strip() or None,
             "completed_hands": len(history),
             "model_version": report.get("version"),
+            "display_gate_policy": GROUP_GATE_POLICY,
+            "core_research_direction": core_view.get("direction", "SKIP"),
+            "core_reasons": list(core_view.get("reasons") or []),
             "research_direction": direction,
             "eligible": view.get("eligible") is True,
             "reason": str(view.get("reason") or report.get("reason") or "")[:64],
             "reasons": list(view.get("reasons") or []),
-            # Read diagnostics from this report, never recalculate the gate.
+            # All metrics are the original core estimates.
             "gate_metrics": {key: view.get(key) for key in (
                 "abs_ev_gap", "ev_gap_se", "ev_gap_snr", "ess_ratio",
                 "ancestor_diversity",
             )},
-            "gate_thresholds": {key: (report.get("config") or {}).get(key) for key in (
-                "MIN_DIRECTION_ROUNDS", "MIN_DIRECTION_EV_GAP",
-                "MIN_DIRECTION_GAP_SNR", "MIN_DIRECTION_ESS_RATIO",
-                "MIN_DIRECTION_DIVERSITY", "MAX_DIRECTION_GAP_SE",
-            )},
+            "gate_thresholds": thresholds,
+            "core_gate_thresholds": {key: (report.get("config") or {}).get(key)
+                                     for key in GATE_KEYS},
             "kelly_tier": kelly_tier,
             "display_tier": tier,
             "tier_basis": "observe" if direction == "SKIP" else (
