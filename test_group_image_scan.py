@@ -222,6 +222,44 @@ class GroupOCRTests(unittest.TestCase):
         self.assertLessEqual(len(fake.sent[0][1][0]["quickReply"]["items"]), 13)
         finish.assert_called_once()
 
+    def test_real_manual_and_screenshot_histories_have_identical_next_forecast(self):
+        self.env["GROUP_ALLOWED_IDS"] = "C-good,C-manual"
+        for history in (list("BBB"), list("BBBBBBBB")):
+            with self.subTest(hands=len(history)):
+                self.start()
+                claim = self.claim(self.image())
+                image_result = finish_image(claim, self.screen(history),
+                                            environ=self.env, state_path=self.path)
+                handle_group_event(self.event("開始分析", group="C-manual"),
+                                   environ=self.env, state_path=self.path)
+                for outcome in history:
+                    manual_result = handle_group_event(
+                        self.event(outcome, group="C-manual"),
+                        environ=self.env, state_path=self.path)
+                self.assertEqual(manual_result, image_result)
+                self.assertIn("建議注數：", manual_result)
+                states = json.loads(self.path.read_text())["groups"]
+                self.assertEqual(states["C-good"]["history"], states["C-manual"]["history"])
+                self.assertEqual(states["C-good"]["pending_tier"], states["C-manual"]["pending_tier"])
+                self.assertEqual(states["C-good"]["last_simulation_tier"],
+                                 states["C-manual"]["last_simulation_tier"])
+
+    def test_manual_result_continues_screenshot_history_without_reset(self):
+        from bbb_soft_shoe_runtime import analyze_history
+        from group_text_research import _research
+        history = list("BPPBTBBPPTBP")
+        self.start()
+        claim = self.claim(self.image())
+        finish_image(claim, self.screen(history), environ=self.env, state_path=self.path)
+        result = handle_group_event(self.event("莊"), environ=self.env, state_path=self.path)
+        extended = history + ["B"]
+        expected_direction, expected_tier, expected_text = _research(extended, analyze_history)
+        self.assertEqual(result, expected_text)
+        self.assertIn("第 14 局", result)
+        self.assertEqual(self.state()["history"], extended)
+        self.assertEqual(self.state()["last_research_direction"], expected_direction)
+        self.assertEqual(self.state()["pending_tier"], expected_tier)
+
 
 if __name__ == "__main__":
     unittest.main()

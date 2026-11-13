@@ -267,7 +267,7 @@ class GroupTextResearchTests(unittest.TestCase):
         self.assertEqual(self.state()["history"], [])
         self.assertTrue(self.state()["active"])
 
-    def test_eligible_research_direction_survives_zero_kelly_tier(self):
+    def test_bp_direction_gets_explicit_fixed_minimum_when_kelly_is_zero(self):
         def low_tier(hist):
             report = self.predictor(hist)
             report["probabilities"] = {"B": .51, "P": .48, "T": .01}
@@ -278,10 +278,52 @@ class GroupTextResearchTests(unittest.TestCase):
             predictor=low_tier, state_path=self.path)
         self.assertIn("推薦方向：🔴 莊", msg)
         self.assertNotIn("推薦方向：⚪ 觀望", msg)
-        self.assertIn("建議注數：0 注（模擬）", msg)
+        self.assertIn("建議注數：5 注（模擬，固定最低級距）", msg)
         self.assertEqual(len(msg.splitlines()), 3)
         self.assertEqual(self.state()["last_research_direction"], "B")
-        self.assertEqual(self.state()["pending_tier"], 0)
+        self.assertEqual(self.state()["pending_tier"], 5)
+        self.assertEqual(self.state()["last_simulation_tier"], 5)
+        self.assertIn("上次模擬注數：5 注", self.call("查詢狀態"))
+        self.assertIn("+5", self.call("+"))
+        self.assertIn("沒有待結算", self.call("+"))
+
+    def test_manual_result_aliases_work_without_any_screenshot(self):
+        self.call("開始分析")
+        commands = ("莊", "閒", "和", "b", "Ｐ", " t ", "🔴 莊", "🔵閒", "🟢 和")
+        for index, command in enumerate(commands):
+            result = self.call(command)
+            self.assertIn(f"第 {index + 2} 局", result)
+            self.assertIn("建議注數：", result)
+            self.assertEqual(len(result.splitlines()), 3)
+        self.assertEqual(self.state()["history"], list("BPTBPTBPT"))
+
+    def test_fixed_minimum_cannot_mask_invalid_model_probabilities(self):
+        self.call("開始分析")
+        for probabilities in ({}, {"B": float("nan"), "P": .4},
+                              {"B": .8, "P": .7}, {"B": 0, "P": 0}):
+            report = self.predictor([])
+            report["probabilities"] = probabilities
+            with self.subTest(probabilities=probabilities), \
+                    self.assertRaisesRegex(RuntimeError, "模型機率資料無效"):
+                handle_group_event(self.event("莊"), environ=self.env,
+                                   state_path=self.path, predictor=lambda _: report)
+            self.assertEqual(self.state()["history"], [])
+            self.assertEqual(self.state()["pending_tier"], 0)
+
+    def test_text_only_real_engine_explains_early_observe_then_shows_units(self):
+        self.call("開始分析")
+        for number in range(1, 4):
+            result = handle_group_event(self.event("莊"), environ=self.env,
+                                        state_path=self.path)
+            self.assertIn(f"第 {number + 1} 局", result)
+            self.assertEqual(len(result.splitlines()), 3)
+            if number < 3:
+                self.assertIn("樣本不足，至少需 3 局", result)
+                self.assertIn("建議注數：0 注（模擬）", result)
+            else:
+                self.assertIn("推薦方向：🔵 閒", result)
+                self.assertIn("建議注數：5 注（模擬，固定最低級距）", result)
+        self.assertEqual(self.state()["history"], list("BBB"))
 
     def test_actual_research_skip_keeps_skip_and_explains_causes(self):
         def uncertain(hist):
@@ -298,6 +340,7 @@ class GroupTextResearchTests(unittest.TestCase):
             self.event("紅"), environ=self.env,
             predictor=uncertain, state_path=self.path)
         self.assertIn("推薦方向：⚪ 觀望", msg)
+        self.assertIn("EV 差距不足", msg)
         self.assertEqual(len(msg.splitlines()), 3)
         self.assertIn("建議注數：0 注（模擬）", msg)
         self.assertEqual(self.state()["last_research_direction"], "SKIP")
@@ -366,6 +409,10 @@ class GroupTextResearchTests(unittest.TestCase):
                 self.assertEqual(record["repository_commit"], "a" * 40)
                 self.assertEqual(record["research_direction"], report["research_view"]["direction"])
                 self.assertEqual(record["reasons"], report["research_view"]["reasons"])
+                self.assertEqual(record["kelly_tier"], 0)
+                self.assertEqual(record["display_tier"], 5 if len(history) == 3 else 0)
+                if len(history) == 3:
+                    self.assertEqual(record["tier_basis"], "fixed_minimum")
                 for key, value in record["gate_metrics"].items():
                     self.assertEqual(value, report["research_view"][key])
                 for key, value in record["gate_thresholds"].items():

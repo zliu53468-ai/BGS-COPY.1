@@ -4,7 +4,9 @@ import hashlib
 import hmac
 import json
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from fastapi import FastAPI
@@ -19,6 +21,7 @@ class LegacyStub:
 
     def __init__(self):
         self.messages = []
+        self.pushes = []
         self.visits = []
         self.scheduled = []
         import traceback
@@ -37,6 +40,10 @@ class LegacyStub:
 
     def _reply(self, token, messages):
         self.messages.append((token, messages))
+        return True
+
+    def _push(self, target, messages, **kwargs):
+        self.pushes.append((target, messages))
         return True
 
     def _schedule_background(self, coroutine):
@@ -120,6 +127,85 @@ class WebhookRouteTests(unittest.TestCase):
         self.assertEqual(self.stub.messages[0][1][0]["text"], "研究觀望")
         self.assertIn("quickReply", self.stub.messages[0][1][0])
         handler.assert_called_once()
+        self.assertEqual(self.stub.pushes, [])
+
+    def test_failed_text_reply_falls_back_to_same_group(self):
+        message = "📊 第 4 局\n推薦方向：🔵 閒\n建議注數：5 注（模擬）"
+        event = self.event({"type": "group", "groupId": "C-good",
+                            "userId": "U-admin"}, "expired-reply")
+        with patch("line_group_webhook.handle_group_event", return_value=message), \
+                patch.object(self.stub, "_reply", return_value=False):
+            response = self.post([event])
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(self.stub.pushes), 1)
+        target, messages = self.stub.pushes[0]
+        self.assertEqual(target, "C-good")
+        self.assertEqual(messages[0]["text"], message)
+        self.assertIn("quickReply", messages[0])
+        self.assertEqual(self.stub.visits, [])
+
+    def test_reply_failure_does_not_lose_or_duplicate_manual_hand(self):
+        from bbb_soft_shoe_runtime import VERSION
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
+            "GROUP_STATE_FILE": str(Path(directory) / "group.json"),
+            "GROUP_TEXT_ENABLED": "1", "GROUP_ADMIN_UID": "U-admin",
+            "GROUP_ADMIN_UIDS": "", "GROUP_ALLOWED_IDS": "C-good",
+            "GROUP_RESEARCH_GATE_LOG": "0",
+        }):
+            source = {"type": "group", "groupId": "C-good", "userId": "U-admin"}
+            self.post([self.event(source, "start", "開始分析")])
+            report = {"version": VERSION, "action": "Skip", "validated_edge": False,
+                      "bankroll_fraction": 0, "probabilities": {"B": .51, "P": .48, "T": .01},
+                      "research_view": {"direction": "B", "eligible": True},
+                      "road_aux": {"validated_betting_edge": False}}
+            result = self.event(source, "hand-1", "莊")
+            with patch("group_text_research.analyze_history", return_value=report) as model, \
+                    patch.object(self.stub, "_reply", return_value=False):
+                self.assertEqual(self.post([result]).status_code, 200)
+                self.assertEqual(self.post([result]).status_code, 200)
+            model.assert_called_once_with(["B"])
+            self.assertEqual(len(self.stub.pushes), 1)
+            self.assertEqual(self.stub.pushes[0][0], "C-good")
+            self.assertIn("第 2 局", self.stub.pushes[0][1][0]["text"])
+            self.assertIn("5 注（模擬，固定最低級距）", self.stub.pushes[0][1][0]["text"])
+            state = json.loads((Path(directory) / "group.json").read_text())["groups"]["C-good"]
+            self.assertEqual(state["history"], ["B"])
+
+    def test_reply_exception_recovers_without_repeating_handler(self):
+        event = self.event({"type": "group", "groupId": "C-good",
+                            "userId": "U-admin"}, "reply-network-error")
+        with patch("line_group_webhook.handle_group_event", return_value="測試回覆") as handler, \
+                patch.object(self.stub, "_reply", side_effect=TimeoutError("request timeout")):
+            response = self.post([event])
+        self.assertEqual(response.status_code, 200)
+        handler.assert_called_once()
+        self.assertEqual(len(self.stub.pushes), 1)
+        self.assertEqual(self.stub.pushes[0][0], "C-good")
+
+    def test_failed_push_is_logged_without_repeating_model_or_exposing_ids(self):
+        event = self.event({"type": "group", "groupId": "C-secret",
+                            "userId": "U-secret"}, "private-token")
+        with patch("line_group_webhook.handle_group_event", return_value="私密結果") as handler, \
+                patch.object(self.stub, "_reply", return_value=False), \
+                patch.object(self.stub, "_push", return_value=False) as push, \
+                patch("builtins.print") as log:
+            response = self.post([event])
+        self.assertEqual(response.status_code, 200)
+        handler.assert_called_once()
+        push.assert_called_once()
+        output = str(log.call_args_list)
+        self.assertIn('"ok": false', output)
+        for secret in ("C-secret", "U-secret", "private-token", "私密結果"):
+            self.assertNotIn(secret, output)
+
+    def test_signed_but_unauthorized_text_never_replies_or_pushes(self):
+        with patch.dict(os.environ, {"GROUP_ADMIN_UID": "U-approved",
+                                    "GROUP_ADMIN_UIDS": "", "GROUP_ALLOWED_IDS": "C-good"}):
+            response = self.post([self.event({"type": "group", "groupId": "C-good",
+                                              "userId": "U-outsider"}, "outsider")])
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.stub.messages, [])
+        self.assertEqual(self.stub.pushes, [])
 
     def test_personal_non_uid_preserves_legacy_if_opted_in(self):
         with patch.dict(os.environ, {"GROUP_ONLY_MODE": "0"}):

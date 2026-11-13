@@ -21,6 +21,37 @@ from group_image_scan import reserve_image, scan_and_reply_group
 from group_reply_ui import group_message
 
 
+async def _deliver_group_text(legacy_app, event, text: str) -> bool:
+    """Reply once; recover a failed reply by pushing to the original group.
+
+    The handler has already validated the sender/group and persisted the event.
+    Never run it again to retry delivery, or a hand could be counted twice.
+    """
+    source = event.get("source") or {}
+    group_id = str(source.get("groupId") or "")
+    if source.get("type") != "group" or not group_id:
+        return False
+    messages = [group_message(text)]
+    token = str(event.get("replyToken") or "")
+    try:
+        if token and await asyncio.to_thread(legacy_app._reply, token, messages):
+            return True
+    except Exception as exc:
+        # A timeout can leave reply delivery uncertain. Retry the message only,
+        # never the model/state mutation; do not expose tokens or message text.
+        print("group_text_reply_error", type(exc).__name__, flush=True)
+    try:
+        sent = await asyncio.to_thread(
+            legacy_app._push, group_id, messages, max_retries=0)
+    except Exception as exc:
+        print("group_text_push_error", type(exc).__name__, flush=True)
+        sent = False
+    print("group_text_delivery", json.dumps({
+        "method": "push_fallback", "ok": bool(sent),
+    }), flush=True)
+    return bool(sent)
+
+
 def install_group_webhook(app, legacy_app) -> None:
     original_webhook = legacy_app.webhook
     original_routes = [
@@ -108,7 +139,7 @@ def install_group_webhook(app, legacy_app) -> None:
                     legacy_app.traceback.print_exc()
                     reply = "⚠️ 群組研究指令處理失敗，本次沒有更新紀錄。"
                 if reply:
-                    legacy_app._reply(token, [group_message(reply)])
+                    await _deliver_group_text(legacy_app, event, reply)
             elif is_uid_request(event):
                 uid = str(source.get("userId") or "").strip()
                 if uid:

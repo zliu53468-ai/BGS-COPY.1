@@ -142,6 +142,7 @@ def finish_image(
             return "⚠️ 群組圖片分析已逾時取消，未更新牌路。"
         state["history"] = history
         state["last_research_direction"] = direction
+        state["last_simulation_tier"] = tier
         state["pending_tier"] = tier
         group._save(path, data)
         # The research result already includes the next hand number.

@@ -22,6 +22,10 @@ from bbb_soft_shoe_runtime import MAX_HANDS, VERSION, analyze_history
 _LOCK = threading.RLock()
 RESULTS = {"紅": "B", "藍": "P", "和": "T",
            "莊": "B", "閒": "P", "和局": "T"}
+RESULT_ALIASES = {
+    "B": "紅", "P": "藍", "T": "和",
+    "🔴莊": "紅", "🔵閒": "藍", "🟢和": "和",
+}
 SIDE_LABEL = {"B": "🔴 莊", "P": "🔵 閒", "T": "🟢 和", "SKIP": "⚪ 觀望"}
 ALLOWED_UNITS = (5, 10, 20)
 MAX_EVENTS = 200
@@ -68,6 +72,7 @@ def _default() -> dict[str, Any]:
         "active": False, "paused": False, "history": [],
         "run_id": uuid.uuid4().hex,
         "net_units": 0, "pending_tier": 0, "last_research_direction": "SKIP",
+        "last_simulation_tier": 0,
         "records": [], "processed": [],
     }
 
@@ -93,6 +98,7 @@ def _status(state: Mapping[str, Any], stop: int) -> str:
         f"休息門檻：{stop} 注\n"
         f"已記錄牌局：{len(state.get('history', []))} 局\n"
         f"上次研究方向：{SIDE_LABEL.get(state.get('last_research_direction'), '觀望')}\n"
+        f"上次模擬注數：{int(state.get('last_simulation_tier', state.get('pending_tier', 0)) or 0)} 注\n"
         "正式下注：Skip／0 注（未驗證投注優勢）"
     )
 
@@ -136,7 +142,17 @@ def _research(history: list[str], predictor: Callable[[list[str]], Mapping[str, 
     road = report.get("road_aux") or {}
     if road.get("validated_betting_edge") is not False:
         raise RuntimeError("安全鎖定：牌路不得授權正式下注")
-    tier, _fractional = _kelly_simulation(report, direction)
+    if direction in ("B", "P"):
+        pair = [(report.get("probabilities") or {}).get(side) for side in ("B", "P")]
+        if (not all(isinstance(value, (int, float)) and math.isfinite(value)
+                    and value >= 0 for value in pair)
+                or not 0 < sum(pair) <= 1.0000001):
+            raise RuntimeError("模型機率資料無效，未產生固定模擬注數")
+    kelly_tier, _fractional = _kelly_simulation(report, direction)
+    # User-requested display minimum, separate from the unchanged Kelly result
+    # and formal wager gate. A true SKIP always retains zero units.
+    tier = max(ALLOWED_UNITS[0], kelly_tier) if direction in ("B", "P") else 0
+    fixed_minimum = tier > kelly_tier
     # Match the exact BGS LINE Soft Shoe research direction. No local
     # probability smoothing, threshold override, or candidate->bet fallback.
     # This diagnostic logs NO chat ID, UID, screenshot, or personal history.
@@ -159,14 +175,31 @@ def _research(history: list[str], predictor: Callable[[list[str]], Mapping[str, 
                 "MIN_DIRECTION_GAP_SNR", "MIN_DIRECTION_ESS_RATIO",
                 "MIN_DIRECTION_DIVERSITY", "MAX_DIRECTION_GAP_SE",
             )},
-            "kelly_tier": tier,
+            "kelly_tier": kelly_tier,
+            "display_tier": tier,
+            "tier_basis": "observe" if direction == "SKIP" else (
+                "fixed_minimum" if fixed_minimum else "kelly"),
         }, ensure_ascii=False, separators=(",", ":")), flush=True)
+    direction_label = SIDE_LABEL[direction]
+    if direction == "SKIP":
+        reason = str(view.get("reason") or next(iter(view.get("reasons") or []), ""))
+        minimum_rounds = (report.get("config") or {}).get("MIN_DIRECTION_ROUNDS", 3)
+        reason_label = {
+            "insufficient_rounds": f"樣本不足，至少需 {minimum_rounds} 局",
+            "weak_ev_separation": "EV 差距不足",
+            "low_gap_to_noise": "訊號相對雜訊不足",
+            "high_estimator_uncertainty": "估計誤差偏高",
+            "low_particle_ess": "有效樣本不足",
+            "low_particle_diversity": "樣本多樣性不足",
+        }.get(reason, "未通過原模型門檻")
+        direction_label += f"（{reason_label}）"
+    unit_label = "模擬，固定最低級距" if fixed_minimum else "模擬"
     # Three short lines only. The number is the next hand being forecast;
     # units are research simulations, NEVER real-money stake authorizations.
     msg = (
         f"📊 第 {len(history) + 1} 局\n"
-        f"推薦方向：{SIDE_LABEL[direction]}\n"
-        f"建議注數：{tier} 注（模擬）"
+        f"推薦方向：{direction_label}\n"
+        f"建議注數：{tier} 注（{unit_label}）"
     )
     return direction, tier, msg
 
@@ -206,6 +239,7 @@ def handle_group_event(
     if sender not in authorized_uids:
         return None
     raw = unicodedata.normalize("NFKC", str(message.get("text") or "")).strip()
+    raw = RESULT_ALIASES.get(raw.upper().replace(" ", ""), raw)
     if raw in ("查詢群組ID", "群組ID"):
         # Bootstrap an approved administrator before group ID is allowlisted.
         return f"群組 ID：{group_id}\n請加入 Render GROUP_ALLOWED_IDS；請勿公開此 ID。"
@@ -241,7 +275,7 @@ def handle_group_event(
                 "開始分析／結束分析／查詢狀態\n"
                 "紅=莊、藍=閒、和=和局\n"
                 "+5、-5、+10、-10、+20、-20：手動注數結果\n"
-                "+／-：套用上一筆 Kelly 模擬分級\n"
+                "+／-：套用上一筆顯示的模擬注數\n"
                 "休息：主動暫停；達 -30 注自動休息\n"
                 "「結束分析」會清空本場牌路、模擬注數及待結算紀錄\n"
                 "開啟新場次請輸入「開始分析」\n"
@@ -252,7 +286,7 @@ def handle_group_event(
             state["active"] = True
             result = (
                 "✅ 已開始新一靴｜目前 0 局\n"
-                "請上傳牌路圖片，或點下方快捷選單。\n"
+                "請上傳完整牌路，或逐局輸入莊／閒／和（B／P／T）。\n"
                 "群組研究不需要設定本金。"
             )
         elif raw == "結束分析":
@@ -285,6 +319,7 @@ def handle_group_event(
                 history, analyze_history if predictor is None else predictor)
             state["history"] = history
             state["last_research_direction"] = direction
+            state["last_simulation_tier"] = tier
             state["pending_tier"] = tier
             result = analysis
         else:
