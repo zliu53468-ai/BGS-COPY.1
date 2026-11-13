@@ -128,11 +128,10 @@ def _research(history: list[str], predictor: Callable[[list[str]], Mapping[str, 
         report.get("bankroll_fraction") != 0):
         raise RuntimeError("安全鎖定：BBB 正式下注閘門與研究版本不一致")
     view = report.get("research_view") or {}
-    # Research direction is NOT the Kelly stake tier. Previously, an
-    # eligible B/P direction was hidden as "觀望" whenever rounded Kelly <5.
-    # Preserve BBB's research gate exactly and only fix the presentation.
+    # 與私人 Soft Shoe 路徑對齊：只看 research_view.direction，
+    # 不再強制要求 eligible=True，避免群組過度觀望。
     direction = str(view.get("direction") or "SKIP")
-    if direction not in ("B", "P") or view.get("eligible") is not True:
+    if direction not in ("B", "P"):
         direction = "SKIP"
     road = report.get("road_aux") or {}
     if road.get("validated_betting_edge") is not False:
