@@ -2,9 +2,14 @@
 from __future__ import annotations
 
 import json
+import copy
+import io
+import os
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 from group_text_research import (
     VERSION, _kelly_simulation, handle_group_event,
@@ -329,6 +334,47 @@ class GroupTextResearchTests(unittest.TestCase):
         self.path.write_text(json.dumps(data), encoding="utf-8")
         self.assertIn("72 局上限", self.call("藍"))
         self.assertEqual(len(self.state()["history"]), 72)
+
+    def test_gate_diagnostics_preserve_actual_prediction_and_report(self):
+        from bbb_soft_shoe_runtime import analyze_history
+        from group_text_research import _research
+
+        # Real engine examples: B/P with a zero Kelly tier, and a true SKIP.
+        for history in (list("BBB"), list("BBBBBBBB")):
+            with self.subTest(hands=len(history)):
+                report = analyze_history(history)
+                original = copy.deepcopy(report)
+                with patch.dict(os.environ, {"GROUP_RESEARCH_GATE_LOG": "0"}):
+                    quiet = io.StringIO()
+                    with redirect_stdout(quiet):
+                        expected = _research(history, lambda _: report)
+                self.assertEqual(quiet.getvalue(), "")
+                output = io.StringIO()
+                with patch.dict(os.environ, {
+                    "GROUP_RESEARCH_GATE_LOG": "1",
+                    "RENDER_GIT_COMMIT": "a" * 40,
+                    "LINE_CHANNEL_ACCESS_TOKEN": "do-not-log-token",
+                    "GROUP_ADMIN_UID": "do-not-log-uid",
+                }), redirect_stdout(output):
+                    actual = _research(history, lambda _: report)
+                self.assertEqual(actual, expected)
+                self.assertEqual(report, original)
+                self.assertEqual(len(actual[2].splitlines()), 3)
+                prefix, payload = output.getvalue().strip().split(" ", 1)
+                self.assertEqual(prefix, "group_research_gate")
+                record = json.loads(payload)
+                self.assertEqual(record["repository_commit"], "a" * 40)
+                self.assertEqual(record["research_direction"], report["research_view"]["direction"])
+                self.assertEqual(record["reasons"], report["research_view"]["reasons"])
+                for key, value in record["gate_metrics"].items():
+                    self.assertEqual(value, report["research_view"][key])
+                for key, value in record["gate_thresholds"].items():
+                    self.assertEqual(value, report["config"][key])
+                self.assertNotIn("do-not-log", payload)
+                self.assertNotIn('"history"', payload)
+                self.assertEqual(report["action"], "Skip")
+                self.assertEqual(report["bankroll_fraction"], 0)
+                self.assertFalse(report["validated_edge"])
 
 
 if __name__ == "__main__":

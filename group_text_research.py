@@ -142,11 +142,23 @@ def _research(history: list[str], predictor: Callable[[list[str]], Mapping[str, 
     # This diagnostic logs NO chat ID, UID, screenshot, or personal history.
     if str(os.getenv("GROUP_RESEARCH_GATE_LOG", "1")).strip() == "1":
         print("group_research_gate", json.dumps({
+            "repository_commit": os.getenv("RENDER_GIT_COMMIT", "").strip() or None,
             "completed_hands": len(history),
             "model_version": report.get("version"),
             "research_direction": direction,
             "eligible": view.get("eligible") is True,
             "reason": str(view.get("reason") or report.get("reason") or "")[:64],
+            "reasons": list(view.get("reasons") or []),
+            # Read diagnostics from this report, never recalculate the gate.
+            "gate_metrics": {key: view.get(key) for key in (
+                "abs_ev_gap", "ev_gap_se", "ev_gap_snr", "ess_ratio",
+                "ancestor_diversity",
+            )},
+            "gate_thresholds": {key: (report.get("config") or {}).get(key) for key in (
+                "MIN_DIRECTION_ROUNDS", "MIN_DIRECTION_EV_GAP",
+                "MIN_DIRECTION_GAP_SNR", "MIN_DIRECTION_ESS_RATIO",
+                "MIN_DIRECTION_DIVERSITY", "MAX_DIRECTION_GAP_SE",
+            )},
             "kelly_tier": tier,
         }, ensure_ascii=False, separators=(",", ":")), flush=True)
     # Three short lines only. The number is the next hand being forecast;

@@ -3,10 +3,12 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import time
 import unittest
+from unittest.mock import Mock, patch
 from typing import Any, Mapping
 
 import bbb_soft_shoe_runtime as soft
@@ -20,6 +22,33 @@ class SoftShoeOCRTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         soft.verify_source()
+
+    def test_version_endpoint_distinguishes_deployment_from_upstream_source(self):
+        tree = ast.parse((ROOT / "runtime_app.py").read_text(encoding="utf-8"))
+        endpoint = next(n for n in tree.body
+                        if isinstance(n, ast.FunctionDef) and n.name == "prediction_version")
+        endpoint.decorator_list = []
+        verify = Mock(wraps=soft.verify_source)
+        env = {"Any": Any, "os": os, "_verify_soft_shoe_source": verify,
+               "SOFT_SHOE_VERSION": soft.VERSION,
+               "SOFT_SHOE_SOURCE_COMMIT": soft.SOURCE_COMMIT,
+               "SOFT_SHOE_SOURCE_BLOBS": soft.SOURCE_BLOBS}
+        exec(compile(ast.Module(body=[endpoint], type_ignores=[]),
+                     "version_endpoint", "exec"), env)
+        with patch.dict(os.environ, {"RENDER_GIT_COMMIT": "a" * 40}, clear=True):
+            deployed = env["prediction_version"]()
+        self.assertEqual(deployed["model"], soft.VERSION)
+        self.assertEqual(deployed["release"], soft.VERSION)
+        self.assertEqual(deployed["repository_commit"], "a" * 40)
+        self.assertEqual(deployed["source_commit"], soft.SOURCE_COMMIT)
+        self.assertEqual(deployed["source_blobs"], soft.SOURCE_BLOBS)
+        self.assertFalse(deployed["verified_edge"])
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(env["prediction_version"]()["repository_commit"])
+        self.assertEqual(verify.call_count, 2)
+        verify.side_effect = RuntimeError("source blob mismatch")
+        with self.assertRaisesRegex(RuntimeError, "source blob mismatch"):
+            env["prediction_version"]()
 
     def test_sources_and_config_match_bbb(self):
         self.assertEqual(soft.SOURCE_COMMIT, "ce34c8be77df4fc5922a59454daf3dc22d1a1898")

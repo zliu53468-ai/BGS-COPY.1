@@ -12,6 +12,7 @@ OCR, screenshot recognition, LINE transport and UI layout remain unchanged.
 """
 from __future__ import annotations
 
+import os
 from typing import Any, Mapping
 
 from dynamic_prediction_policy import install_dynamic_prediction_policy
@@ -294,10 +295,12 @@ def prediction_version() -> dict[str, Any]:
     _verify_soft_shoe_source()
     return {
         "release": SOFT_SHOE_VERSION,
+        # Upstream engine revision and deployed COPY revision are distinct.
         "source_commit": SOFT_SHOE_SOURCE_COMMIT,
+        "repository_commit": os.getenv("RENDER_GIT_COMMIT", "").strip() or None,
         "source_blobs": SOFT_SHOE_SOURCE_BLOBS,
         "input_mode": "ocr_image_plus_manual_BPT",
         "independent_final_score": False,
         "verified_edge": False,
-        "model": "BBB_SOFT_SHOE_BPT_EV_V1",
+        "model": SOFT_SHOE_VERSION,
     }
