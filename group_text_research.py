@@ -26,18 +26,44 @@ RESULT_ALIASES = {
     "B": "紅", "P": "藍", "T": "和",
     "🔴莊": "紅", "🔵閒": "藍", "🟢和": "和",
 }
-SIDE_LABEL = {"B": "🔴 莊", "P": "🔵 閒", "T": "🟢 和", "SKIP": "⚪ 觀望"}
+SIDE_LABEL = {"B": "🔴 莊", "P": "🔵 閒", "T": "🟢 和", "SKIP": "尚未產生"}
 ALLOWED_UNITS = (5, 10, 20)
 MAX_EVENTS = 200
-GROUP_GATE_POLICY = "COPY_GROUP_MODERATE_V1"
-GROUP_GATE_OVERRIDES = {
-    "MIN_DIRECTION_EV_GAP": .008,
-    "MIN_DIRECTION_GAP_SNR": 1.00,
-}
+GROUP_GATE_POLICY = "COPY_GROUP_ALWAYS_CANDIDATE_V1"
 GATE_KEYS = (
     "MIN_DIRECTION_ROUNDS", "MIN_DIRECTION_EV_GAP", "MIN_DIRECTION_GAP_SNR",
     "MIN_DIRECTION_ESS_RATIO", "MIN_DIRECTION_DIVERSITY", "MAX_DIRECTION_GAP_SE",
 )
+SCORE_HELP = (
+    "✍️ 請輸入閒、莊各自最後總點數（0～9）。\n"
+    "例如：閒8莊4、8,4 或 84，均為閒8點／莊4點。\n"
+    "順序固定先閒後莊；也接受莊4閒8。多局請逐行輸入，最多20局。"
+)
+
+
+def parse_group_scores(value: str) -> list[dict[str, int]] | None:
+    """Final totals only; preserve the existing Player-then-Banker convention.
+
+    Pure parsing: never import personal sessions or the independent-score model.
+    Each parsed pair becomes one B/P/T observation for the unchanged Soft Shoe.
+    """
+    text = unicodedata.normalize("NFKC", str(value or "")).strip()
+    chunks = [part.strip() for part in re.split(r"[\n;；]+", text) if part.strip()]
+    if not chunks or len(chunks) > 20:
+        return None
+    pairs = []
+    for chunk in chunks:
+        pb = re.fullmatch(r"閒\s*[:=：]?\s*([0-9])\s*[,，/、\- ]*莊\s*[:=：]?\s*([0-9])", chunk)
+        bp = re.fullmatch(r"莊\s*[:=：]?\s*([0-9])\s*[,，/、\- ]*閒\s*[:=：]?\s*([0-9])", chunk)
+        bare = re.fullmatch(r"([0-9])\s*[,，/、\- ]+\s*([0-9])", chunk)
+        compact = re.fullmatch(r"([0-9])([0-9])", chunk)
+        match = pb or bp or bare or compact
+        if not match:
+            return None
+        left, right = map(int, match.groups())
+        player, banker = (right, left) if bp else (left, right)
+        pairs.append({"player": player, "banker": banker})
+    return pairs
 
 
 def _allowed(raw: str) -> set[str]:
@@ -78,7 +104,7 @@ def _save(path: Path, data: dict[str, Any]) -> None:
 
 def _default() -> dict[str, Any]:
     return {
-        "active": False, "paused": False, "history": [],
+        "active": False, "paused": False, "history": [], "score_records": [],
         "run_id": uuid.uuid4().hex,
         "net_units": 0, "pending_tier": 0, "last_research_direction": "SKIP",
         "last_simulation_tier": 0,
@@ -106,9 +132,8 @@ def _status(state: Mapping[str, Any], stop: int) -> str:
         f"累計：{int(state.get('net_units', 0)):+d} 注（管理員手動紀錄）\n"
         f"休息門檻：{stop} 注\n"
         f"已記錄牌局：{len(state.get('history', []))} 局\n"
-        f"上次研究方向：{SIDE_LABEL.get(state.get('last_research_direction'), '觀望')}\n"
+        f"上次研究方向：{SIDE_LABEL.get(state.get('last_research_direction'), '尚未產生')}\n"
         f"上次模擬注數：{int(state.get('last_simulation_tier', state.get('pending_tier', 0)) or 0)} 注\n"
-        "正式下注：Skip／0 注（未驗證投注優勢）"
     )
 
 
@@ -136,60 +161,21 @@ def _kelly_simulation(report: Mapping[str, Any], side: str) -> tuple[int, float]
     return tier, fractional
 
 
-def _group_display_view(report: Mapping[str, Any], hands: int) -> tuple[dict, dict]:
-    """Relax two group DISPLAY thresholds, without modifying the core report.
+def _display_direction(report: Mapping[str, Any], hands: int) -> str:
+    """Show the unchanged core candidate, regardless of research-display gates.
 
-    Only a fully diagnosed borderline SKIP can be promoted to the core's own
-    candidate. Missing metrics, unknown reasons and every other guard retain
-    SKIP. Text and screenshots share this policy; private predictions do not.
+    Invalid/missing predictions are errors, never invented B/P recommendations.
+    This does not change research eligibility or the formal wager decision.
     """
-    view = dict(report.get("research_view") or {})
-    cfg = report.get("config") or {}
-    thresholds = {key: cfg.get(key) for key in GATE_KEYS}
-
-    def finite(value):
-        return type(value) in (int, float) and math.isfinite(value)
-
-    if (cfg.get("RESEARCH_DIRECTION_RELAXED") is not True
-            or not all(finite(value) for value in thresholds.values())
-            or thresholds["MIN_DIRECTION_ROUNDS"] < 3):
-        return view, thresholds
-    thresholds.update({key: min(value, thresholds[key])
-                       for key, value in GROUP_GATE_OVERRIDES.items()})
-    if view.get("direction") != "SKIP" or view.get("eligible") is not False:
-        return view, thresholds
-    reasons = view.get("reasons")
-    relaxable = {"weak_ev_separation", "low_gap_to_noise"}
-    if (not isinstance(reasons, list) or not reasons
-            or not all(isinstance(reason, str) and reason in relaxable for reason in reasons)
-            or (view.get("reason") and
-                (not isinstance(view["reason"], str) or view["reason"] not in relaxable))):
-        return view, thresholds
-    candidate = view.get("candidate")
-    metrics = [view.get(key) for key in (
-        "abs_ev_gap", "ev_gap_snr", "ev_gap_se", "ess_ratio", "ancestor_diversity",
-    )]
-    if (candidate not in ("B", "P") or candidate != report.get("candidate")
-            or report.get("observations") != hands
-            or hands < thresholds["MIN_DIRECTION_ROUNDS"]
-            or not all(finite(value) for value in metrics)):
-        return view, thresholds
-    gap, snr, se, ess, diversity = metrics
-    remaining = []
-    if gap < thresholds["MIN_DIRECTION_EV_GAP"]:
-        remaining.append("weak_ev_separation")
-    if not 0 < se <= thresholds["MAX_DIRECTION_GAP_SE"]:
-        remaining.append("high_estimator_uncertainty")
-    if snr < thresholds["MIN_DIRECTION_GAP_SNR"]:
-        remaining.append("low_gap_to_noise")
-    if not thresholds["MIN_DIRECTION_ESS_RATIO"] <= ess <= 1:
-        remaining.append("low_particle_ess")
-    if not thresholds["MIN_DIRECTION_DIVERSITY"] <= diversity <= 1:
-        remaining.append("low_particle_diversity")
-    view.update(direction="SKIP" if remaining else candidate, eligible=not remaining,
-                reason=remaining[0] if remaining else "group_moderate_gate_pass",
-                reasons=remaining)
-    return view, thresholds
+    candidate = report.get("candidate")
+    ev_b, ev_p = report.get("ev_banker"), report.get("ev_player")
+    if (hands < 1 or report.get("observations") != hands
+            or candidate not in ("B", "P")
+            or not all(type(value) in (int, float) and math.isfinite(value)
+                       for value in (ev_b, ev_p))
+            or candidate != ("B" if ev_b >= ev_p else "P")):
+        raise RuntimeError("模型結果缺失或不一致，本次未產生預測")
+    return candidate
 
 
 def _research(history: list[str], predictor: Callable[[list[str]], Mapping[str, Any]]) -> tuple[str, int, str]:
@@ -199,23 +185,19 @@ def _research(history: list[str], predictor: Callable[[list[str]], Mapping[str, 
         report.get("bankroll_fraction") != 0):
         raise RuntimeError("安全鎖定：BBB 正式下注閘門與研究版本不一致")
     core_view = report.get("research_view") or {}
-    view, thresholds = _group_display_view(report, len(history))
-    direction = str(view.get("direction") or "SKIP")
-    if direction not in ("B", "P"):
-        direction = "SKIP"
+    direction = _display_direction(report, len(history))
     road = report.get("road_aux") or {}
     if road.get("validated_betting_edge") is not False:
         raise RuntimeError("安全鎖定：牌路不得授權正式下注")
-    if direction in ("B", "P"):
-        pair = [(report.get("probabilities") or {}).get(side) for side in ("B", "P")]
-        if (not all(isinstance(value, (int, float)) and math.isfinite(value)
-                    and value >= 0 for value in pair)
-                or not 0 < sum(pair) <= 1.0000001):
-            raise RuntimeError("模型機率資料無效，未產生固定模擬注數")
+    pair = [(report.get("probabilities") or {}).get(side) for side in ("B", "P")]
+    if (not all(type(value) in (int, float) and math.isfinite(value)
+                and value >= 0 for value in pair)
+            or not 0 < sum(pair) <= 1.0000001):
+        raise RuntimeError("模型機率資料無效，未產生固定模擬注數")
     kelly_tier, _fractional = _kelly_simulation(report, direction)
     # User-requested display minimum, separate from the unchanged Kelly result
-    # and formal wager gate. A true SKIP always retains zero units.
-    tier = max(ALLOWED_UNITS[0], kelly_tier) if direction in ("B", "P") else 0
+    # and formal wager gate. Every valid displayed candidate has a tier.
+    tier = max(ALLOWED_UNITS[0], kelly_tier)
     fixed_minimum = tier > kelly_tier
     # Keep core forecasts and the formal wager gate intact. The group-only
     # display policy is logged separately from the original research decision.
@@ -229,35 +211,23 @@ def _research(history: list[str], predictor: Callable[[list[str]], Mapping[str, 
             "core_research_direction": core_view.get("direction", "SKIP"),
             "core_reasons": list(core_view.get("reasons") or []),
             "research_direction": direction,
-            "eligible": view.get("eligible") is True,
-            "reason": str(view.get("reason") or report.get("reason") or "")[:64],
-            "reasons": list(view.get("reasons") or []),
+            "eligible": core_view.get("eligible") is True,
+            "display_basis": "core_candidate",
+            "reason": str(core_view.get("reason") or report.get("reason") or "")[:64],
+            "reasons": list(core_view.get("reasons") or []),
             # All metrics are the original core estimates.
-            "gate_metrics": {key: view.get(key) for key in (
+            "gate_metrics": {key: core_view.get(key) for key in (
                 "abs_ev_gap", "ev_gap_se", "ev_gap_snr", "ess_ratio",
                 "ancestor_diversity",
             )},
-            "gate_thresholds": thresholds,
+            "gate_thresholds": {},
             "core_gate_thresholds": {key: (report.get("config") or {}).get(key)
                                      for key in GATE_KEYS},
             "kelly_tier": kelly_tier,
             "display_tier": tier,
-            "tier_basis": "observe" if direction == "SKIP" else (
-                "fixed_minimum" if fixed_minimum else "kelly"),
+            "tier_basis": "fixed_minimum" if fixed_minimum else "kelly",
         }, ensure_ascii=False, separators=(",", ":")), flush=True)
     direction_label = SIDE_LABEL[direction]
-    if direction == "SKIP":
-        reason = str(view.get("reason") or next(iter(view.get("reasons") or []), ""))
-        minimum_rounds = (report.get("config") or {}).get("MIN_DIRECTION_ROUNDS", 3)
-        reason_label = {
-            "insufficient_rounds": f"樣本不足，至少需 {minimum_rounds} 局",
-            "weak_ev_separation": "EV 差距不足",
-            "low_gap_to_noise": "訊號相對雜訊不足",
-            "high_estimator_uncertainty": "估計誤差偏高",
-            "low_particle_ess": "有效樣本不足",
-            "low_particle_diversity": "樣本多樣性不足",
-        }.get(reason, "未通過原模型門檻")
-        direction_label += f"（{reason_label}）"
     unit_label = "模擬，固定最低級距" if fixed_minimum else "模擬"
     # Three short lines only. The number is the next hand being forecast;
     # units are research simulations, NEVER real-money stake authorizations.
@@ -318,10 +288,13 @@ def handle_group_event(
         # Never mutate mutable session state without an idempotency key.
         return "⚠️ 訊息缺少事件 ID，未記錄任何操作。"
     parser = re.fullmatch(r"([+-])\s*(5|10|20)", raw)
+    scores = parse_group_scores(raw)
     if raw not in RESULTS and raw not in (
         "開始分析", "結束分析", "查詢狀態", "目前狀態", "休息", "暫停分析",
-        "查詢指令", "操作說明", "+", "-",
-    ) and not parser:
+        "查詢指令", "操作說明", "點數格式", "+", "-",
+    ) and not parser and scores is None:
+        if re.match(r"^(?:[+-]?\d|[閒莊]\s*[:=：]?\s*[+-]?\d)", raw):
+            return "⚠️ 點數格式不正確，整則訊息未記錄。\n" + SCORE_HELP
         return None
     path = state_path if state_path is not None else _path(env)
     with _LOCK:
@@ -334,25 +307,28 @@ def handle_group_event(
         # Read-only queries do not need storage or event mutation.
         if raw in ("查詢狀態", "目前狀態"):
             return _status(state, stop)
+        if raw == "點數格式":
+            return SCORE_HELP
         if raw in ("查詢指令", "操作說明"):
             return (
                 "🔐 群組管理員指令\n"
                 "開始分析／結束分析／查詢狀態\n"
+                + SCORE_HELP + "\n"
                 "紅=莊、藍=閒、和=和局\n"
                 "+5、-5、+10、-10、+20、-20：手動注數結果\n"
                 "+／-：套用上一筆顯示的模擬注數\n"
                 "休息：主動暫停；達 -30 注自動休息\n"
                 "「結束分析」會清空本場牌路、模擬注數及待結算紀錄\n"
                 "開啟新場次請輸入「開始分析」\n"
-                "所有下注級距僅為研究模擬，正式 Skip。"
+                "所有注數級距僅為研究模擬。"
             )
         if raw == "開始分析":
             state = groups[group_id] = _fresh_session(state)
             state["active"] = True
             result = (
                 "✅ 已開始新一靴｜目前 0 局\n"
-                "請上傳完整牌路，或逐局輸入莊／閒／和（B／P／T）。\n"
-                "群組研究不需要設定本金。"
+                + SCORE_HELP + "\n"
+                "每局輸入一次，直接回覆下一局方向與模擬注數。"
             )
         elif raw == "結束分析":
             # Explicitly delete all per-shoe B/P/T history, manual P&L logs,
@@ -371,18 +347,26 @@ def handle_group_event(
             result = "🛑 已暫停研究訊號。\n" + _status(state, stop)
         elif not state.get("active"):
             return "請管理員先輸入「開始分析」。"
-        elif raw in RESULTS:
+        elif raw in RESULTS or scores is not None:
             if state.get("paused"):
                 return "🛑 已達休息狀態；不再提供研究配注。新場次請輸入「開始分析」。"
             history = list(state.get("history") or [])
-            if len(history) >= MAX_HANDS:
-                return "本靴已達 72 局上限；請結束本場，重新開始分析。"
-            history.append(RESULTS[raw])
+            outcomes = (["P" if pair["player"] > pair["banker"] else
+                         "B" if pair["banker"] > pair["player"] else "T"
+                         for pair in scores] if scores is not None else [RESULTS[raw]])
+            if len(history) + len(outcomes) > MAX_HANDS:
+                return "本次輸入會超過 72 局上限，整則訊息未記錄；請結束本場，重新開始分析。"
+            previous_hands = len(history)
+            history.extend(outcomes)
             # Compute before committing the new history: any model failure
             # leaves the state unchanged, with no fabricated prediction.
             direction, tier, analysis = _research(
                 history, analyze_history if predictor is None else predictor)
             state["history"] = history
+            if scores is not None:
+                state.setdefault("score_records", []).extend(
+                    {"hand": previous_hands + index + 1, **pair}
+                    for index, pair in enumerate(scores))
             state["last_research_direction"] = direction
             state["last_simulation_tier"] = tier
             state["pending_tier"] = tier

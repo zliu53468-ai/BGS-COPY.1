@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from group_text_research import (
-    VERSION, GROUP_GATE_OVERRIDES, _group_display_view, _kelly_simulation,
+    VERSION, _display_direction, _kelly_simulation, parse_group_scores,
     _research, handle_group_event,
 )
 
@@ -51,6 +51,8 @@ class GroupTextResearchTests(unittest.TestCase):
         return {
             "version": VERSION, "action": "Skip",
             "validated_edge": False, "bankroll_fraction": 0,
+            "observations": len(history), "candidate": "B",
+            "ev_banker": .307, "ev_player": -.34,
             "probabilities": {"B": .66, "P": .32, "T": .02},
             "research_view": {
                 "eligible": True, "direction": "B",
@@ -191,7 +193,7 @@ class GroupTextResearchTests(unittest.TestCase):
         self.assertIn("建議注數：5 注（模擬）", result)
         self.assertEqual(self.state()["last_research_direction"], "B")
 
-    def test_research_skip_still_observes_when_not_eligible(self):
+    def test_research_skip_shows_original_candidate_when_not_eligible(self):
         def skip_direction(history):
             report = self.predictor(history)
             report["research_view"]["eligible"] = False
@@ -202,9 +204,10 @@ class GroupTextResearchTests(unittest.TestCase):
         result = handle_group_event(
             self.event("紅"), environ=self.env,
             predictor=skip_direction, state_path=self.path)
-        self.assertIn("推薦方向：⚪ 觀望", result)
-        self.assertIn("建議注數：0 注（模擬）", result)
-        self.assertEqual(self.state()["last_research_direction"], "SKIP")
+        self.assertIn("推薦方向：🔴 莊", result)
+        self.assertNotIn("觀望", result)
+        self.assertIn("建議注數：5 注（模擬）", result)
+        self.assertEqual(self.state()["last_research_direction"], "B")
 
     def test_kelly_calculation_floored_to_tiers(self):
         for probs, tier in (
@@ -302,7 +305,7 @@ class GroupTextResearchTests(unittest.TestCase):
         self.call("開始分析")
         for probabilities in ({}, {"B": float("nan"), "P": .4},
                               {"B": .8, "P": .7}, {"B": 0, "P": 0}):
-            report = self.predictor([])
+            report = self.predictor(["B"])
             report["probabilities"] = probabilities
             with self.subTest(probabilities=probabilities), \
                     self.assertRaisesRegex(RuntimeError, "模型機率資料無效"):
@@ -311,22 +314,18 @@ class GroupTextResearchTests(unittest.TestCase):
             self.assertEqual(self.state()["history"], [])
             self.assertEqual(self.state()["pending_tier"], 0)
 
-    def test_text_only_real_engine_explains_early_observe_then_shows_units(self):
+    def test_text_only_real_engine_shows_candidate_from_first_result(self):
         self.call("開始分析")
         for number in range(1, 4):
             result = handle_group_event(self.event("莊"), environ=self.env,
                                         state_path=self.path)
             self.assertIn(f"第 {number + 1} 局", result)
             self.assertEqual(len(result.splitlines()), 3)
-            if number < 3:
-                self.assertIn("樣本不足，至少需 3 局", result)
-                self.assertIn("建議注數：0 注（模擬）", result)
-            else:
-                self.assertIn("推薦方向：🔵 閒", result)
-                self.assertIn("建議注數：5 注（模擬，固定最低級距）", result)
+            self.assertNotIn("觀望", result)
+            self.assertIn("建議注數：5 注（模擬，固定最低級距）", result)
         self.assertEqual(self.state()["history"], list("BBB"))
 
-    def test_actual_research_skip_keeps_skip_and_explains_causes(self):
+    def test_research_skip_reasons_do_not_hide_valid_candidate(self):
         def uncertain(hist):
             report = self.predictor(hist)
             report["research_view"].update({
@@ -340,14 +339,14 @@ class GroupTextResearchTests(unittest.TestCase):
         msg = handle_group_event(
             self.event("紅"), environ=self.env,
             predictor=uncertain, state_path=self.path)
-        self.assertIn("推薦方向：⚪ 觀望", msg)
-        self.assertIn("EV 差距不足", msg)
+        self.assertIn("推薦方向：🔴 莊", msg)
+        self.assertNotIn("觀望", msg)
         self.assertEqual(len(msg.splitlines()), 3)
-        self.assertIn("建議注數：0 注（模擬）", msg)
-        self.assertEqual(self.state()["last_research_direction"], "SKIP")
+        self.assertIn("建議注數：5 注（模擬）", msg)
+        self.assertEqual(self.state()["last_research_direction"], "B")
 
     def test_real_bgs_adapter_preserves_existing_nonborderline_directions(self):
-        """The moderate group policy leaves established BGS directions intact."""
+        """Group uses the core candidate; the private adapter is unchanged."""
         from bbb_soft_shoe_runtime import analyze_history, predict_screen
         from group_text_research import _research
 
@@ -360,8 +359,8 @@ class GroupTextResearchTests(unittest.TestCase):
                 report = analyze_history(history)
                 adapter = predict_screen(history)
                 direction, tier, message = _research(history, lambda _: report)
-                self.assertEqual(direction, adapter["bbb_soft_shoe"]["display_direction"])
-                self.assertEqual(direction, adapter["research_view"]["direction"])
+                self.assertEqual(direction, report["candidate"])
+                self.assertEqual(report["research_view"], adapter["research_view"])
                 self.assertEqual(len(message.splitlines()), 3)
                 self.assertIn(f"📊 第 {len(history) + 1} 局", message)
                 self.assertIn("推薦方向：", message)
@@ -378,6 +377,99 @@ class GroupTextResearchTests(unittest.TestCase):
         self.path.write_text(json.dumps(data), encoding="utf-8")
         self.assertIn("72 局上限", self.call("藍"))
         self.assertEqual(len(self.state()["history"]), 72)
+
+    def test_score_formats_and_all_final_total_pairs(self):
+        for text in ("84", "８４", "8,4", "8 4", "8/4", "閒8莊4", "莊4 閒8", "閒：8，莊：4"):
+            self.assertEqual(parse_group_scores(text), [{"player": 8, "banker": 4}], text)
+        for player in range(10):
+            for banker in range(10):
+                self.assertEqual(parse_group_scores(f"{player}{banker}"),
+                                 [{"player": player, "banker": banker}])
+        for invalid in ("", "8", "10,4", "閒10莊4", "8.5,4", "-1,4", "abc", "84\n10,4"):
+            self.assertIsNone(parse_group_scores(invalid), invalid)
+
+    def test_total_scores_append_the_same_bpt_history_and_keep_ties(self):
+        started = self.call("開始分析")
+        self.assertIn("先閒後莊", started)
+        for text in ("84", "莊9閒1", "66"):
+            self.assertNotIn("觀望", self.call(text))
+        self.assertEqual(self.histories, [["P"], ["P", "B"], ["P", "B", "T"]])
+        self.assertEqual(self.state()["history"], list("PBT"))
+        self.assertEqual(self.state()["score_records"], [
+            {"hand": 1, "player": 8, "banker": 4},
+            {"hand": 2, "player": 1, "banker": 9},
+            {"hand": 3, "player": 6, "banker": 6},
+        ])
+        self.call("紅")
+        self.call("09")
+        self.assertEqual(self.state()["history"], list("PBTBB"))
+        self.assertEqual(self.state()["score_records"][-1]["hand"], 5)
+        self.call("結束分析")
+        self.assertEqual(self.state()["score_records"], [])
+        self.assertNotIn("觀望", self.call("查詢狀態"))
+
+    def test_score_batch_commits_once_and_deduplicates_webhook(self):
+        self.call("開始分析")
+        event = self.event("84\n閒1莊9;66", event_id="score-batch")
+        result = handle_group_event(event, environ=self.env, state_path=self.path,
+                                    predictor=self.predictor)
+        self.assertIn("第 4 局", result)
+        self.assertEqual(self.histories, [list("PBT")])
+        self.assertIsNone(handle_group_event(event, environ=self.env, state_path=self.path,
+                                             predictor=self.predictor))
+        self.assertEqual(len(self.state()["score_records"]), 3)
+
+    def test_invalid_or_oversized_batch_does_not_record_partial_history(self):
+        self.call("開始分析")
+        before = self.path.read_bytes()
+        for text in ("84\n10,4", "1234", "閒10莊4", "84\n" * 21):
+            self.assertIn("未記錄", self.call(text))
+            self.assertEqual(self.path.read_bytes(), before)
+        state = json.loads(self.path.read_text())
+        state["groups"]["C-group-1"]["history"] = ["B"] * 71
+        self.path.write_text(json.dumps(state))
+        before = self.path.read_bytes()
+        self.assertIn("72 局上限", self.call("84\n19"))
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(self.histories, [])
+
+    def test_scores_respect_authorization_pause_and_group_isolation(self):
+        self.assertIsNone(self.call("84", uid="U-outsider"))
+        self.assertIsNone(self.call("84", group="C-outsider"))
+        self.assertFalse(self.path.exists())
+        self.assertIn("開始分析", self.call("84"))
+        self.call("開始分析")
+        before = self.path.read_bytes()
+        self.assertIn("先閒後莊", self.call("點數格式"))
+        self.assertEqual(self.path.read_bytes(), before)
+        self.call("84")
+        self.call("開始分析", group="C-group-2")
+        self.call("19", group="C-group-2")
+        self.assertEqual(self.state()["history"], ["P"])
+        self.assertEqual(self.state("C-group-2")["history"], ["B"])
+        self.call("休息")
+        self.assertIn("休息", self.call("84"))
+        self.assertEqual(self.state()["history"], ["P"])
+
+    def test_model_failure_rolls_back_scores_and_event_id(self):
+        self.call("開始分析")
+        before = self.path.read_bytes()
+        with self.assertRaises(TimeoutError):
+            handle_group_event(self.event("84"), environ=self.env, state_path=self.path,
+                               predictor=lambda _: (_ for _ in ()).throw(TimeoutError()))
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_total_score_input_matches_unchanged_soft_shoe_history(self):
+        from bbb_soft_shoe_runtime import analyze_history, verify_source
+        verify_source()
+        self.call("開始分析")
+        result = handle_group_event(self.event("84\n19\n66"), environ=self.env,
+                                    state_path=self.path)
+        report = analyze_history(list("PBT"))
+        self.assertEqual(result, _research(list("PBT"), lambda _: report)[2])
+        self.assertEqual(self.state()["last_research_direction"], report["candidate"])
+        self.assertNotIn("觀望", result)
+        self.assertEqual(report["action"], "Skip")
 
     def test_gate_diagnostics_preserve_actual_prediction_and_report(self):
         from bbb_soft_shoe_runtime import analyze_history
@@ -408,16 +500,16 @@ class GroupTextResearchTests(unittest.TestCase):
                 self.assertEqual(prefix, "group_research_gate")
                 record = json.loads(payload)
                 self.assertEqual(record["repository_commit"], "a" * 40)
-                self.assertEqual(record["research_direction"], report["research_view"]["direction"])
+                self.assertEqual(record["research_direction"], report["candidate"])
+                self.assertEqual(record["eligible"], report["research_view"]["eligible"])
                 self.assertEqual(record["reasons"], report["research_view"]["reasons"])
                 self.assertEqual(record["kelly_tier"], 0)
-                self.assertEqual(record["display_tier"], 5 if len(history) == 3 else 0)
+                self.assertEqual(record["display_tier"], 5)
                 if len(history) == 3:
                     self.assertEqual(record["tier_basis"], "fixed_minimum")
                 for key, value in record["gate_metrics"].items():
                     self.assertEqual(value, report["research_view"][key])
-                for key, value in record["gate_thresholds"].items():
-                    self.assertEqual(value, GROUP_GATE_OVERRIDES.get(key, report["config"][key]))
+                self.assertEqual(record["gate_thresholds"], {})
                 for key, value in record["core_gate_thresholds"].items():
                     self.assertEqual(value, report["config"][key])
                 self.assertNotIn("do-not-log", payload)
@@ -427,100 +519,40 @@ class GroupTextResearchTests(unittest.TestCase):
                 self.assertFalse(report["validated_edge"])
 
 
-class GroupModerateGateTests(unittest.TestCase):
-    def report(self):
-        return {
-            "version": VERSION, "action": "Skip", "bankroll_fraction": 0,
-            "validated_edge": False, "observations": 24, "candidate": "B",
-            "probabilities": {"B": .46, "P": .444, "T": .096},
-            "road_aux": {"validated_betting_edge": False},
-            "config": {
-                "RESEARCH_DIRECTION_RELAXED": True, "MIN_DIRECTION_ROUNDS": 3,
-                "MIN_DIRECTION_EV_GAP": .010, "MIN_DIRECTION_GAP_SNR": 1.05,
-                "MIN_DIRECTION_ESS_RATIO": .40, "MIN_DIRECTION_DIVERSITY": .25,
-                "MAX_DIRECTION_GAP_SE": .070,
-            },
-            "research_view": {
-                "direction": "SKIP", "candidate": "B", "eligible": False,
-                "reason": "weak_ev_separation",
-                "reasons": ["weak_ev_separation", "low_gap_to_noise"],
-                "abs_ev_gap": .009, "ev_gap_snr": 1.02, "ev_gap_se": .009 / 1.02,
-                "ess_ratio": .8, "ancestor_diversity": .8,
-            },
-        }
-
-    def test_borderline_group_direction_and_units_preserve_full_core_report(self):
-        report = self.report()
-        original = copy.deepcopy(report)
-        output = io.StringIO()
-        with patch.dict(os.environ, {"GROUP_RESEARCH_GATE_LOG": "1"}), redirect_stdout(output):
-            direction, tier, message = _research(["B"] * 24, lambda _: report)
-        self.assertEqual((direction, tier), ("B", 5))
-        self.assertIn("固定最低級距", message)
-        self.assertEqual(report, original)
-        record = json.loads(output.getvalue().split(" ", 1)[1])
-        self.assertEqual(record["core_research_direction"], "SKIP")
-        self.assertEqual(record["research_direction"], "B")
-        self.assertEqual(record["core_reasons"], original["research_view"]["reasons"])
-        self.assertEqual(record["reasons"], [])
-
-    def test_both_threshold_boundaries_are_required(self):
-        for gap, snr, expected in ((.008, 1., "B"), (.007999, 1.1, "SKIP"),
-                                   (.009, .999, "SKIP")):
-            with self.subTest(gap=gap, snr=snr):
-                report = self.report()
-                report["research_view"].update(abs_ev_gap=gap, ev_gap_snr=snr)
-                view, _ = _group_display_view(report, 24)
-                self.assertEqual(view["direction"], expected)
-                if gap >= .008 and snr < 1:
-                    self.assertEqual(view["reasons"], ["low_gap_to_noise"])
-
-    def test_existing_quality_guards_cannot_be_bypassed(self):
-        for key, value in (("ev_gap_se", 0), ("ev_gap_se", .070001),
-                           ("ess_ratio", .3999), ("ancestor_diversity", .2499),
-                           ("ev_gap_snr", float("nan")), ("abs_ev_gap", None),
-                           ("ev_gap_se", float("inf"))):
-            with self.subTest(key=key, value=value):
-                report = self.report()
-                report["research_view"][key] = value
-                self.assertEqual(_group_display_view(report, 24)[0]["direction"], "SKIP")
-        for hands in (0, 1, 2):
-            report = self.report()
-            report["observations"] = hands
-            self.assertEqual(_group_display_view(report, hands)[0]["direction"], "SKIP")
-
-    def test_incomplete_unknown_or_inconsistent_reports_keep_skip(self):
-        for case in ("unknown", "missing_reasons", "missing_config", "strict",
-                     "candidate_mismatch", "history_mismatch", "invalid_reason"):
-            with self.subTest(case=case):
-                report = self.report()
-                if case == "unknown":
-                    report["research_view"]["reasons"].append("future_guard")
-                elif case == "missing_reasons":
-                    report["research_view"].pop("reasons")
-                elif case == "missing_config":
-                    report.pop("config")
-                elif case == "strict":
-                    report["config"]["RESEARCH_DIRECTION_RELAXED"] = False
-                elif case == "candidate_mismatch":
-                    report["candidate"] = "P"
-                elif case == "history_mismatch":
-                    report["observations"] = 23
-                else:
-                    report["research_view"]["reasons"] = [[]]
-                self.assertEqual(_group_display_view(report, 24)[0]["direction"], "SKIP")
-
-    def test_real_borderline_fixture_changes_group_only(self):
+class GroupCandidateTests(unittest.TestCase):
+    def test_all_valid_core_candidates_display_without_mutation(self):
         from bbb_soft_shoe_runtime import analyze_history, predict_screen
-        history = list("BPBPBBBBBBBBPPPPPTTPPPBP")
-        report = analyze_history(history)
-        original = copy.deepcopy(report)
-        self.assertEqual(report["research_view"]["direction"], "SKIP")
-        direction, tier, _ = _research(history, lambda _: report)
-        self.assertEqual(direction, report["candidate"])
-        self.assertEqual(tier, 5)
-        self.assertEqual(report, original)
-        self.assertEqual(predict_screen(history)["research_view"]["direction"], "SKIP")
+        # Include first-hand, ties, strong signals and formerly blocked histories.
+        for raw in ("B", "P", "T", "BB", "TT", "BBB", "BBBBBBBB",
+                    "BPBPBBBBBBBBPPPPPTTPPPBP", "BBPPPTTBBPBPTPPBBTP"):
+            with self.subTest(history=raw):
+                history = list(raw)
+                report = analyze_history(history)
+                original = copy.deepcopy(report)
+                direction, tier, message = _research(history, lambda _: report)
+                self.assertEqual(direction, report["candidate"])
+                self.assertIn(direction, ("B", "P"))
+                self.assertIn(tier, (5, 10, 20))
+                self.assertNotIn("觀望", message)
+                self.assertEqual(report, original)
+                self.assertEqual(predict_screen(history)["research_view"], report["research_view"])
+                self.assertEqual(report["action"], "Skip")
+                self.assertEqual(report["bankroll_fraction"], 0)
+
+    def test_no_fabricated_direction_for_missing_or_inconsistent_result(self):
+        good = {"observations": 1, "candidate": "B", "ev_banker": .01, "ev_player": -.02}
+        for field, value in (("candidate", None), ("candidate", "T"),
+                              ("candidate", "P"), ("observations", 2),
+                              ("ev_banker", float("nan")), ("ev_player", None)):
+            with self.subTest(field=field, value=value):
+                with self.assertRaisesRegex(RuntimeError, "模型結果缺失"):
+                    _display_direction({**good, field: value}, 1)
+        with self.assertRaises(RuntimeError):
+            _display_direction({**good, "observations": 0}, 0)
+
+    def test_ev_tie_keeps_original_core_tie_break(self):
+        self.assertEqual(_display_direction({"observations": 1, "candidate": "B",
+                                            "ev_banker": 0, "ev_player": 0}, 1), "B")
 
 
 if __name__ == "__main__":

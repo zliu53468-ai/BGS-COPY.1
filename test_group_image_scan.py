@@ -50,6 +50,8 @@ class GroupOCRTests(unittest.TestCase):
         return {
             "version": VERSION, "action": "Skip",
             "validated_edge": False, "bankroll_fraction": 0,
+            "observations": len(history), "candidate": "B",
+            "ev_banker": .307, "ev_player": -.34,
             "probabilities": {"B": .66, "P": .32, "T": .02},
             "research_view": {
                 "eligible": True, "direction": "B", "road_confirmed": True},
@@ -235,7 +237,7 @@ class GroupOCRTests(unittest.TestCase):
                                    environ=self.env, state_path=self.path)
                 for outcome in history:
                     manual_result = handle_group_event(
-                        self.event(outcome, group="C-manual"),
+                        self.event({"B": "19", "P": "91", "T": "55"}[outcome], group="C-manual"),
                         environ=self.env, state_path=self.path)
                 self.assertEqual(manual_result, image_result)
                 self.assertIn("建議注數：", manual_result)

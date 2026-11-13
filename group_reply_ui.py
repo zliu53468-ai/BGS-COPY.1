@@ -19,6 +19,7 @@ def quick_reply_items() -> list[dict[str, Any]]:
 
     return [
         message("▶ 開始分析", "開始分析"),
+        message("✍ 點數格式", "點數格式"),
         {
             "type": "action",
             "action": {"type": "cameraRoll", "label": "📷 上傳牌路"},
