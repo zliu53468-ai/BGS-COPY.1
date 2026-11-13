@@ -11,7 +11,6 @@ import base64
 import hashlib
 import hmac
 import json
-import os
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -81,10 +80,9 @@ def install_group_webhook(app, legacy_app) -> None:
             return JSONResponse({"ok": False}, status_code=400)
         if not events:
             return await original_webhook(request)
-        # BGS-COPY.1 is a group-text BOT by default. Personal OCR/Flex
-        # replies can be re-enabled explicitly by GROUP_ONLY_MODE=0.
-        # The legacy app and prediction core remain untouched.
-        group_only = str(os.getenv("GROUP_ONLY_MODE", "1")).strip() == "1"
+        # Both chat types are supported. The retired GROUP_ONLY_MODE setting
+        # must not silently discard private text, images, follows or postbacks.
+        # Only explicit user sources may enter the unchanged personal handler.
 
         def is_uid_request(event) -> bool:
             source = event.get("source") or {}
@@ -96,12 +94,10 @@ def install_group_webhook(app, legacy_app) -> None:
                 and str(message.get("text") or "").strip() in ("查詢UID", "我的UID")
             )
 
-        if not any(
-            (event.get("source") or {}).get("type") == "group"
-            or is_uid_request(event) for event in events
+        if all(
+            (event.get("source") or {}).get("type") == "user"
+            and not is_uid_request(event) for event in events
         ):
-            if group_only:
-                return JSONResponse({"ok": True})
             return await original_webhook(request)
 
         remaining = []
@@ -146,14 +142,10 @@ def install_group_webhook(app, legacy_app) -> None:
                     legacy_app._reply(token, [legacy_app._text(
                         f"你的 LINE UID：{uid}\n請在 Render 的 GROUP_ADMIN_UIDS 設定此 UID。"
                     )])
-            else:
+            elif source.get("type") == "user":
                 remaining.append(event)
 
         if remaining:
-            if group_only:
-                # A group event must never cause an unrelated private OCR
-                # callback or delayed push(userId) from this copy BOT.
-                return JSONResponse({"ok": True})
             # LINE may batch multiple events. Re-sign only the remaining
             # events AFTER verifying the full original LINE signature.
             # This prevents authorized group messages accidentally entering

@@ -208,7 +208,7 @@ class WebhookRouteTests(unittest.TestCase):
         self.assertEqual(self.stub.messages, [])
         self.assertEqual(self.stub.pushes, [])
 
-    def test_personal_non_uid_preserves_legacy_if_opted_in(self):
+    def test_personal_non_uid_preserves_legacy_with_old_zero_setting(self):
         with patch.dict(os.environ, {"GROUP_ONLY_MODE": "0"}):
             res = self.post([self.event({
                 "type": "user", "userId": "U-regular"
@@ -217,13 +217,34 @@ class WebhookRouteTests(unittest.TestCase):
         self.assertEqual(len(self.stub.visits), 1)
         self.assertEqual(len(self.stub.visits[0]), 1)
 
-    def test_default_group_only_suppresses_private_prediction_callback(self):
+    def test_old_group_only_setting_does_not_suppress_private_prediction(self):
         with patch.dict(os.environ, {"GROUP_ONLY_MODE": "1"}):
             res = self.post([self.event({
                 "type": "user", "userId": "U-regular"
             }, "t2", text="開始分析")])
         self.assertEqual(res.status_code, 200)
-        self.assertEqual(self.stub.visits, [])
+        self.assertEqual(len(self.stub.visits), 1)
+        self.assertEqual(self.stub.visits[0][0]["message"]["text"], "開始分析")
+        self.assertEqual(self.stub.messages, [])
+
+    def test_all_private_event_types_reach_original_handler_by_default(self):
+        source = {"type": "user", "userId": "U-personal"}
+        text = self.event(source, "private-text", text="84")
+        image = self.event(source, "private-image")
+        image["message"] = {"type": "image", "id": "img-private"}
+        postback = {"type": "postback", "source": source,
+                    "replyToken": "private-button", "postback": {"data": "start"}}
+        follow = {"type": "follow", "source": source, "replyToken": "private-follow"}
+        events = [text, image, postback, follow]
+        with patch.dict(os.environ):
+            os.environ.pop("GROUP_ONLY_MODE", None)
+            with patch("line_group_webhook.handle_group_event") as group, \
+                    patch("line_group_webhook.reserve_image") as scan:
+                response = self.post(events)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.stub.visits, [events])
+        group.assert_not_called()
+        scan.assert_not_called()
         self.assertEqual(self.stub.messages, [])
 
 
@@ -254,7 +275,7 @@ class WebhookRouteTests(unittest.TestCase):
         self.assertEqual(len(self.stub.messages), 1)
         handler.assert_called_once()
 
-    def test_default_group_only_mixed_batch_replies_to_group_only(self):
+    def test_old_group_only_mixed_batch_keeps_both_routes_separate(self):
         events = [
             self.event({
                 "type": "group", "groupId": "C-good", "userId": "U-admin"
@@ -267,12 +288,51 @@ class WebhookRouteTests(unittest.TestCase):
                        return_value="下一局研究：🔴 莊｜5 注") as handler:
                 res = self.post(events)
         self.assertEqual(res.status_code, 200)
-        self.assertEqual(self.stub.visits, [])
+        self.assertEqual(self.stub.visits, [[events[1]]])
         self.assertEqual(len(self.stub.messages), 1)
         self.assertEqual(self.stub.messages[0][0], "group")
         self.assertIn("下一局研究：🔴 莊｜5 注",
                       self.stub.messages[0][1][0]["text"])
         handler.assert_called_once()
+
+    def test_mixed_uid_query_image_and_private_button_are_delivered_once(self):
+        source = {"type": "user", "userId": "U-personal"}
+        uid = self.event(source, "uid-token", text="查詢UID")
+        image = self.event(source, "image-token")
+        image["message"] = {"type": "image", "id": "private-image"}
+        button = {"type": "postback", "source": source,
+                  "replyToken": "button-token", "postback": {"data": "start"}}
+        group = self.event({"type": "group", "userId": "U-admin", "groupId": "C-good"},
+                           "group-token", text="84")
+        with patch.dict(os.environ, {"GROUP_ONLY_MODE": "1"}), \
+                patch("line_group_webhook.handle_group_event", return_value="群組結果") as handler:
+            response = self.post([uid, image, group, button])
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.stub.visits, [[image, button]])
+        self.assertEqual([token for token, _ in self.stub.messages], ["uid-token", "group-token"])
+        self.assertEqual(self.stub.pushes, [])
+        handler.assert_called_once_with(group)
+
+    def test_unsupported_sources_cannot_enter_private_handler(self):
+        events = [self.event({"type": "room", "roomId": "R-room", "userId": "U-user"}, "room"),
+                  self.event({"userId": "U-user"}, "unknown")]
+        with patch.dict(os.environ, {"GROUP_ONLY_MODE": "0"}), \
+                patch("line_group_webhook.handle_group_event") as group:
+            response = self.post(events)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.stub.visits, [])
+        self.assertEqual(self.stub.messages, [])
+        group.assert_not_called()
+
+    def test_bad_signature_never_reaches_private_or_group_handler(self):
+        events = [self.event({"type": "user", "userId": "U-user"}, "private"),
+                  self.event({"type": "group", "groupId": "C-good", "userId": "U-admin"}, "group")]
+        with patch("line_group_webhook.handle_group_event") as group:
+            response = self.post(events, valid=False)
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(self.stub.visits, [])
+        self.assertEqual(self.stub.messages, [])
+        group.assert_not_called()
 
     def test_group_image_ack_is_group_reply_not_private_legacy_panel(self):
         event = self.event({

@@ -1,5 +1,14 @@
 # BGS-COPY.1 — LINE 群組純文字研究模式
 
+## 群組與私人聊天同時啟用（2026-11-13）
+
+- 修正私人機器人沒有回應：舊版 `GROUP_ONLY_MODE` 預設為 `1`，會在原私人 handler 執行前直接丟棄私人文字、圖片、加入好友與按鈕事件。現在依 LINE 事件來源分流，兩種聊天室可同時使用。
+- `source.type=user` 送回原本私人流程，保留會員授權、館別、本金、圖片、點數模式、按鈕及 UID 專屬狀態；`查詢UID` 仍由查詢捷徑回覆一次。私人功能仍遵循原有啟用條件，不會套用群組白名單或群組的固定方向展示。
+- `source.type=group` 只走群組路徑，保留管理員與群組雙重白名單；群組訊息與圖片絕不轉送私人預測。混合 webhook 拆分後各處理一次；`room` 或未知來源不轉入私人流程。
+- **`GROUP_ONLY_MODE` 已停用**：即使 Render 留有舊值 `1`，新版也不會因此封鎖私人聊天，可直接刪除該舊變數。無須新增環境設定；需確定部署的是本次修復版本。
+- 此次僅修復路由與文件，不修改個人或群組的預測邏輯、模型、總點數輸入、群組固定方向展示、注數或資料內容。
+
+
 ## 現行總點數輸入與固定方向顯示（2026-11-13，取代下方歷史展示規則）
 
 - 開始一靴後，直接輸入**閒、莊各自最後總點數 0～9**。`閒8莊4`、`8,4`、`8/4`、`84`、`８４` 均為閒8／莊4；`莊4閒8` 也接受。未標示名稱時固定**先閒後莊**，不是雙方點數相加。
@@ -29,7 +38,7 @@
 | KEY | VALUE 範例 | 必要性 |
 |---|---|---|
 | `GROUP_TEXT_ENABLED` | `1` | 建議明確設定。安全白名單為空時不啟用 |
-| `GROUP_ONLY_MODE` | `1` | **BGS-COPY.1 預設只回群組文字**；封鎖私人聊天室原本的預測面板與 OCR 回覆，但保留私訊 `查詢UID`；設 `0` 才恢復舊私人功能 |
+| `GROUP_ONLY_MODE` | 已停用 | 舊值 `1`／`0` 均不再封鎖私訊，可刪除；群組與私人事件按來源自動分流 |
 | `GROUP_IMAGE_SCAN_ENABLED` | `1` | 開啟**群組圖片上傳 OCR 辨識**（不使用舊個人面板）。只接受授權管理員在允許群組中的截圖 |
 | `GROUP_ADMIN_UID` | `U...` | **單一管理員**，只填一個經私訊查詢、核對過的 LINE UID；不要填 LINE Channel ID／Bot basic ID |
 | `GROUP_ADMIN_UIDS` | `U...,...` | 可選，額外多名管理員 UID；與 `GROUP_ADMIN_UID` 任選一種或合併使用 |
@@ -45,7 +54,7 @@
 
 1. LINE Developers 的此 Channel → Messaging API → 開啟 **Allow bot to join group chats** 與 **Use webhook**；Webhook 指向部署服務的 `/webhook` 並驗證成功。將官方帳號加為好友，再邀入一般群組；同一群組只能有一個 LINE 官方帳號。參考 [LINE 官方群組文件](https://developers.line.biz/en/docs/messaging-api/group-chats/)。
 2. 每位操作管理員私訊 BOT `查詢UID`。在 Render 設定 `GROUP_ADMIN_UID=U...`，多人則用 `GROUP_ADMIN_UIDS=U...,U...`，儲存並部署。
-3. 已授權管理員在目標群組傳送 `查詢群組ID`，把回覆的 `C...` 加入 `GROUP_ALLOWED_IDS`。確認 `GROUP_TEXT_ENABLED=1`、`GROUP_IMAGE_SCAN_ENABLED=1`、`GROUP_ONLY_MODE=1`，儲存並部署。
+3. 已授權管理員在目標群組傳送 `查詢群組ID`，把回覆的 `C...` 加入 `GROUP_ALLOWED_IDS`。確認 `GROUP_TEXT_ENABLED=1`、`GROUP_IMAGE_SCAN_ENABLED=1`，儲存並部署。
 4. 群組輸入 `開始分析`，再逐局輸入閒莊總點數，例如 `84`（閒8、莊4）；也可延續既有牌路輸入。每靴只開始一次，重複開始會清空目前牌路。未列入 UID 白名單的成員不能操作，但能看見群組回覆。
 
 這裡的管理員是程式授權的操作人員，不會自動同步 LINE 內的管理員職稱，也不需要把 BOT 設為群組管理員。本程式支援一般群組；LINE 社群 **OpenChat** 不是這條 Messaging API 加群路徑，其內建自動回覆機器人也無法直接執行此 Python／Node 預測服務。若使用 OpenChat，可另開一般操作群組由管理員操作，再手動分享結果到社群。
@@ -96,13 +105,13 @@
 
 - 群組管理員輸入 `紅/藍/和` 後，只在原群組由該 webhook 事件的 **replyToken** 回覆，不以管理員 `userId` 推播私人面板。顯示 `本局結果`、`下一局研究：🔴 莊/🔵 閒/⚪ 觀望｜模擬 N 注`、`Kelly 模擬分級：0/5/10/20 注`、`牌路輔助` 及 `累計注數`。
 - 若 Soft Shoe 未有 eligible 正向研究訊號或凱利模擬級距不足 5 注，可能顯示 0 注；**不得為了固定輸出 5/10/20 而虛構正 EV 或改變研究方向**。
-- `GROUP_ONLY_MODE=1` 預設關掉原有個人預測／圖片回覆路由，避免相同 Channel 的 BOT 從 `BGS-COPY.1` 再把群組結果發到管理員私聊；唯一保留個人私聊查詢 UID 功能。不改動 `app.py` 原始檔，若要回復個人功能，把該變數設為 `0` 再部署。
+- **歷史設定已撤銷：** 舊版 `GROUP_ONLY_MODE=1` 曾封鎖私訊；目前依本文最上方規則，同時支援群組與私人路徑。群組事件仍不會進入私人流程，`app.py` 保持原樣。
 - 群組回覆只使用 LINE 事件原始 `replyToken`，不使用 `push(userId)`；若仍出現私人推播，請檢查是否**其他 Render 舊服務**也使用同一 Channel access token，或使用者曾私訊其他預測機器人。兩個服務共用 Channel Token 時需要拆開／停用其中一個，避免雙重回覆。
 - **管理員啟用順序**：先私訊 `查詢UID`，Render 設 `GROUP_ADMIN_UID=U...`，讓該 UID 在群組輸入 `查詢群組ID`，將得到的 `C...` 填 `GROUP_ALLOWED_IDS`，部署後再以群組輸入 `開始分析`。沒有這兩項白名單時會靜默拒絕。
 
 ## 群組圖片 OCR 版 V3（保留 Soft Shoe、不需要本金）
 
-1. 先設定 `GROUP_ONLY_MODE=1`、`GROUP_TEXT_ENABLED=1`、`GROUP_IMAGE_SCAN_ENABLED=1`、`GROUP_ADMIN_UID`（或 `GROUP_ADMIN_UIDS`）以及 `GROUP_ALLOWED_IDS`。要有 Render Persistent Disk（`GROUP_STATE_FILE` 建議 `/var/data/group_research_state.json`）。
+1. 先設定 `GROUP_TEXT_ENABLED=1`、`GROUP_IMAGE_SCAN_ENABLED=1`、`GROUP_ADMIN_UID`（或 `GROUP_ADMIN_UIDS`）以及 `GROUP_ALLOWED_IDS`。要有 Render Persistent Disk（`GROUP_STATE_FILE` 建議 `/var/data/group_research_state.json`）。
 2. 在**已授權 LINE 群組**輸入 `開始分析`。這會開始新一靴，不要求館別、本金或個人會員授權。
 3. 管理員把**完整清晰的大路／珠盤路圖片**傳送到該群組；BOT 用圖片事件 messageId 下載內容，經既有 `_prepare_analysis_image` 和 `screen_pipeline.analyze_game_screen` 復原 B/P/T。收到時以原始群組 `replyToken` 回覆「圖片掃描中」，完成後使用 `_push(groupId)` 把結果送回**同一群組**，絕不 `push(userId)` 送私人聊天室。
 4. 模型只使用 OCR **可信的完整 B/P/T 歷史**，沒有額外真實牌值、剩餘牌數或 bankroll 參數。不更改 BBB engine、OCR implementation、原有私人 app.py 或正式 Skip / Kelly 安全閘門。模擬 5／10／20 注與先前群組文字規格相同。
