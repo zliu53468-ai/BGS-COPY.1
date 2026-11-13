@@ -169,16 +169,34 @@ class GroupTextResearchTests(unittest.TestCase):
         self.assertEqual(self.state()["history"], [])
         self.assertEqual(self.state()["net_units"], 0)
 
-    def test_no_soft_eligibility_means_observe(self):
-        def no_edge(history):
+    def test_research_b_direction_displays_when_eligible_false(self):
+        # Match private Soft Shoe display: direction B/P is independent of
+        # research eligible, while the official betting gate remains locked.
+        def b_direction(history):
             report = self.predictor(history)
             report["research_view"]["eligible"] = False
             return report
+
         self.call("開始分析")
         result = handle_group_event(
             self.event("紅"), environ=self.env,
-            predictor=no_edge, state_path=self.path)
-        self.assertIn("⚪ 觀望", result)
+            predictor=b_direction, state_path=self.path)
+        self.assertIn("推薦方向：🔴 莊", result)
+        self.assertIn("建議注數：5 注（模擬）", result)
+        self.assertEqual(self.state()["last_research_direction"], "B")
+
+    def test_research_skip_still_observes_when_not_eligible(self):
+        def skip_direction(history):
+            report = self.predictor(history)
+            report["research_view"]["eligible"] = False
+            report["research_view"]["direction"] = "SKIP"
+            return report
+
+        self.call("開始分析")
+        result = handle_group_event(
+            self.event("紅"), environ=self.env,
+            predictor=skip_direction, state_path=self.path)
+        self.assertIn("推薦方向：⚪ 觀望", result)
         self.assertIn("建議注數：0 注（模擬）", result)
         self.assertEqual(self.state()["last_research_direction"], "SKIP")
 
