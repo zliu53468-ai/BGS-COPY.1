@@ -35,7 +35,7 @@ class BeadPlateTests(unittest.TestCase):
                 self.assertEqual(result["raw_outcomes"],history)
                 self.assertEqual(result["sequence"],[v for v in history if v!="T"])
                 self.assertEqual(result["confirmed_round_count"],len(history))
-                self.assertEqual(result["method"],"bead_plate_hough_6row_v1")
+                self.assertEqual(result["method"],"bead_plate_hough_6row_v2_adaptive")
                 self.assertEqual(result["chronology"],"column_major_top_to_bottom")
 
     def test_reject_missing_middle_cell_without_shifting_history(self):
