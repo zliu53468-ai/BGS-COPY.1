@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 from group_text_research import handle_group_event
 from group_image_scan import reserve_image, scan_and_reply_group
 from group_reply_ui import group_message
+import prediction_audit as audit
 
 
 async def _deliver_group_text(legacy_app, event, text: str) -> bool:
@@ -52,6 +53,8 @@ async def _deliver_group_text(legacy_app, event, text: str) -> bool:
 
 
 def install_group_webhook(app, legacy_app) -> None:
+    if getattr(legacy_app, "store", None) is not None:
+        audit.install_store_observer(legacy_app.store)
     original_webhook = legacy_app.webhook
     original_routes = [
         route for route in app.router.routes
@@ -84,19 +87,19 @@ def install_group_webhook(app, legacy_app) -> None:
         # must not silently discard private text, images, follows or postbacks.
         # Only explicit user sources may enter the unchanged personal handler.
 
-        def is_uid_request(event) -> bool:
+        def is_private_command(event, commands) -> bool:
             source = event.get("source") or {}
             message = event.get("message") or {}
             return (
                 source.get("type") == "user"
                 and event.get("type") == "message"
                 and message.get("type") == "text"
-                and str(message.get("text") or "").strip() in ("查詢UID", "我的UID")
+                and str(message.get("text") or "").strip() in commands
             )
 
         if all(
             (event.get("source") or {}).get("type") == "user"
-            and not is_uid_request(event) for event in events
+            and not is_private_command(event, audit.COMMANDS | {"查詢UID", "我的UID"}) for event in events
         ):
             return await original_webhook(request)
 
@@ -136,7 +139,14 @@ def install_group_webhook(app, legacy_app) -> None:
                     reply = "⚠️ 群組研究指令處理失敗，本次沒有更新紀錄。"
                 if reply:
                     await _deliver_group_text(legacy_app, event, reply)
-            elif is_uid_request(event):
+            elif is_private_command(event, audit.COMMANDS):
+                uid = str(source.get("userId") or "").strip()
+                if uid:
+                    state_path = getattr(getattr(legacy_app, "store", None), "SESSION_DATA_FILE", None)
+                    text = await asyncio.to_thread(
+                        audit.report_text, audit.database_path(state_path), audit.scope_key("user", uid))
+                    await asyncio.to_thread(legacy_app._reply, token, [legacy_app._text(text)])
+            elif is_private_command(event, {"查詢UID", "我的UID"}):
                 uid = str(source.get("userId") or "").strip()
                 if uid:
                     legacy_app._reply(token, [legacy_app._text(

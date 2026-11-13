@@ -75,6 +75,19 @@ class GroupOCRTests(unittest.TestCase):
     def state(self):
         return json.loads(self.path.read_text())["groups"]["C-good"]
 
+    def test_ocr_forecast_is_scored_by_following_text_without_recounting_import(self):
+        import prediction_audit as audit
+        self.start()
+        self.done(self.claim(self.image()), self.screen(["B", "P", "T"]))
+        handle_group_event(self.event("38"), environ=self.env, state_path=self.path, predictor=self.model)
+        path, scope = audit.database_path(self.path), audit.scope_key("group", "C-good")
+        stats = audit.summarize(path, scope)
+        self.assertEqual((stats["cohorts"][0]["forecasts"], stats["cohorts"][0]["wins"]), (2, 1))
+        stale = self.claim(self.image())
+        self.start()
+        self.done(stale, self.screen(["B", "P", "T", "B", "P"]))
+        self.assertEqual(audit.summarize(path, scope), stats)
+
     def test_authorization_and_active_session_before_download(self):
         self.assertIsNone(self.claim(self.image(uid="U-outsider")))
         self.assertIsNone(self.claim(self.image(group="C-outside")))

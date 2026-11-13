@@ -25,6 +25,7 @@ def quick_reply_items() -> list[dict[str, Any]]:
             "action": {"type": "cameraRoll", "label": "📷 上傳牌路"},
         },
         message("📊 查詢狀態", "查詢狀態"),
+        message("📈 查詢成績", "查詢成績"),
         message("🔴 莊", "紅"),
         message("🔵 閒", "藍"),
         message("🟢 和", "和"),

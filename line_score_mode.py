@@ -12,6 +12,7 @@ import uuid
 from typing import Any, Mapping
 
 import store
+import prediction_audit as audit
 from bbb_v26_points_runtime import predict_final_score
 
 _PAIR_PB = re.compile(r"^閒\s*[:=：]?\s*([0-9])\s*[,，/、\- ]*莊\s*[:=：]?\s*([0-9])$")
@@ -68,7 +69,7 @@ def begin(uid: str) -> dict[str, Any]:
             "analysis_mode": "screen", "analysis_active": True,
             "analysis_run_id": uuid.uuid4().hex[:16],
             "analysis_started_at": store._now(), "analysis_ended_at": 0,
-            "point_score_mode": True, "point_score_audit": [],
+            "point_score_mode": True, "point_score_audit": [], "point_score_audit_total": 0,
             "last_point_score": {}, "last_point_message_id": "",
             "awaiting_screenshot": False, "awaiting_bankroll": False,
             "status": "等待輸入閒莊點數", "updated_at": store._now(),
@@ -133,6 +134,7 @@ def evaluate_and_save(uid: str, expected_run_id: str,
         before = session.get("point_score_audit")
         if not isinstance(before, list):
             before = []
+        session["point_score_audit_total"] = int(session.get("point_score_audit_total", len(before))) + len(pairs)
         session["point_score_audit"] = (before + [
             {"player": int(p["player"]), "banker": int(p["banker"])}
             for p in pairs
@@ -147,4 +149,5 @@ def evaluate_and_save(uid: str, expected_run_id: str,
         session["updated_at"] = store._now()
         data[uid] = session
         store._save_all_unlocked(data)
+        audit.record_private_points(uid, session, store.SESSION_DATA_FILE)
         return copy.deepcopy(session)

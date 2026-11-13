@@ -10,7 +10,7 @@ class QuickReplyTest(unittest.TestCase):
     def test_supported_group_actions_and_count(self):
         buttons = quick_reply_items()
         self.assertLessEqual(len(buttons), 13)
-        self.assertEqual(len(buttons), 8)
+        self.assertEqual(len(buttons), 9)
         labels = [item["action"]["label"] for item in buttons]
         self.assertEqual(len(set(labels)), len(labels))
         for item in buttons:
@@ -20,7 +20,7 @@ class QuickReplyTest(unittest.TestCase):
         image = next(item["action"] for item in buttons if item["action"]["type"] == "cameraRoll")
         self.assertEqual(image, {"type": "cameraRoll", "label": "📷 上傳牌路"})
         commands = [item["action"].get("text") for item in buttons]
-        for command in ("開始分析", "點數格式", "查詢狀態", "紅", "藍", "和", "結束分析"):
+        for command in ("開始分析", "點數格式", "查詢狀態", "查詢成績", "紅", "藍", "和", "結束分析"):
             self.assertIn(command, commands)
 
     def test_message_contract_and_standalone_button_definitions(self):

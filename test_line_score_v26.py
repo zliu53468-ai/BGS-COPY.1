@@ -14,6 +14,31 @@ ROOT = Path(__file__).resolve().parent
 
 
 class LineScoreV26Tests(unittest.TestCase):
+    def test_private_audit_is_prospective_and_keeps_single_pair_model_input(self):
+        import prediction_audit as audit
+        report = {"version": "test-point-model", "direction": "B", "action": "SKIP",
+                  "ev_banker": -.02, "ev_player": -.03,
+                  "physical_ev": {"simulated_probability": {"B": .46, "P": .44, "T": .1}}}
+        with tempfile.TemporaryDirectory() as tmp, patch.object(store, "SESSION_DATA_FILE", Path(tmp) / "sessions.json"), \
+                patch.object(line_score_mode, "predict_final_score", return_value=report) as model:
+            store.select_venue("UID", "DG")
+            run = line_score_mode.begin("UID")["analysis_run_id"]
+            line_score_mode.evaluate_and_save("UID", run, [{"player": 8, "banker": 4}], "a")
+            session = line_score_mode.evaluate_and_save("UID", run,
+                        [{"player": 3, "banker": 8}, {"player": 9, "banker": 9}], "b")
+            path = audit.database_path(store.SESSION_DATA_FILE)
+            stats = audit.summarize(path, audit.scope_key("user", "UID"))["cohorts"][0]
+            self.assertEqual((stats["forecasts"], stats["wins"], stats["resolved"]), (2, 1, 1))
+            self.assertEqual([c.args for c in model.call_args_list], [(8, 4), (9, 9)])
+            self.assertEqual(session["point_score_audit_total"], 3)
+            self.assertEqual(session["screen_last_prediction"]["bbb_v26_score"], report)
+            line_score_mode.evaluate_and_save("UID", run, [{"player": 9, "banker": 9}], "b")
+            self.assertEqual(model.call_count, 2)
+            with patch.object(audit, "record_history", side_effect=OSError("disk full")):
+                saved = line_score_mode.evaluate_and_save("UID", run, [{"player": 8, "banker": 4}], "c")
+            self.assertEqual(saved["last_point_score"], {"player": 8, "banker": 4})
+            self.assertEqual(saved["screen_last_prediction"]["bbb_v26_score"], report)
+
     def test_immutable_bbb_v4_modules_and_config(self):
         bridge.verify_source()
         self.assertEqual(bridge.SOURCE_COMMIT, "1399cd948449fa4b8d2ddf74a140d539dc2be3cc")

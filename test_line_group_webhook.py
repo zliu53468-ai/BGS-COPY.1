@@ -103,6 +103,27 @@ class WebhookRouteTests(unittest.TestCase):
         ]
         self.assertEqual(len(routes), 1)
 
+    def test_private_audit_query_uses_only_signed_sender_and_preserves_other_events(self):
+        import prediction_audit as audit
+        query = self.event({"type": "user", "userId": "U-regular"}, "query", "查詢成績")
+        normal = self.event({"type": "user", "userId": "U-other"}, "normal", "84")
+        with patch("line_group_webhook.audit.report_text", return_value="私人預測成績") as read:
+            self.assertEqual(self.post([query, normal]).status_code, 200)
+        self.assertEqual(read.call_args.args[1], audit.scope_key("user", "U-regular"))
+        self.assertEqual(self.stub.messages[0][1][0]["text"], "私人預測成績")
+        self.assertEqual(self.stub.visits, [[normal]])
+
+    def test_private_audit_query_cannot_use_group_or_unsigned_identity(self):
+        with patch("line_group_webhook.audit.report_text") as read:
+            self.post([self.event({"type": "user", "userId": "U-regular"}, "query", "查詢成績")], valid=False)
+            self.post([self.event({"type": "user"}, "missing-user", "查詢成績")])
+            self.post([self.event({"type": "room", "userId": "U-regular"}, "room", "查詢成績")])
+            with patch.dict(os.environ, {"GROUP_ADMIN_UID": "approved", "GROUP_ADMIN_UIDS": ""}):
+                self.post([self.event({"type": "group", "userId": "outsider", "groupId": "C-good"}, "group", "查詢成績")])
+        read.assert_not_called()
+        self.assertEqual(self.stub.visits, [])
+        self.assertEqual(self.stub.messages, [])
+
     def test_verify_empty_events_preserves_original(self):
         response = self.post([])
         self.assertEqual(response.status_code, 200)

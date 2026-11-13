@@ -71,6 +71,37 @@ class GroupTextResearchTests(unittest.TestCase):
     def state(self, group="C-group-1"):
         return json.loads(self.path.read_text(encoding="utf-8"))["groups"][group]
 
+    def test_prospective_audit_query_does_not_change_ledger_or_reset_with_session(self):
+        import prediction_audit as audit
+        self.call("開始分析")
+        self.call("84", event_id="score-a")
+        self.call("38\n99\n84", event_id="score-b")
+        self.assertIsNone(self.call("38\n99\n84", event_id="score-b"))
+        before = self.path.read_bytes()
+        self.assertIn("已對帳 1", self.call("查詢成績"))
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertIsNone(self.call("查詢成績", uid="outsider"))
+        self.assertIsNone(self.call("查詢成績", group="outside"))
+        self.assertIn("尚無預測紀錄", self.call("查詢成績", group="C-group-2"))
+        self.assertEqual(self.state()["net_units"], 0)
+        self.assertEqual(self.state()["records"], [])
+        data = audit.summarize(audit.database_path(self.path), audit.scope_key("group", "C-group-1"))
+        self.assertEqual((data["observations"], data["cohorts"][0]["wins"]), (4, 1))
+        self.call("結束分析")
+        self.assertIn("已對帳 1", self.call("查詢成績"))
+        self.call("開始分析")
+        self.call("38")
+        self.assertIn("已對帳 1", self.call("查詢成績"))
+
+    def test_audit_failure_preserves_prediction_reply_and_idempotency(self):
+        self.call("開始分析")
+        with patch("prediction_audit.record_history", side_effect=OSError("disk full")):
+            text = self.call("84", event_id="stored")
+        self.assertIn("建議注數：5 注", text)
+        self.assertEqual(self.state()["history"], ["P"])
+        self.assertIsNone(self.call("84", event_id="stored"))
+        self.assertEqual(len(self.histories), 1)
+
     def test_uid_and_group_both_required(self):
         self.assertIsNone(self.call("開始分析", uid="U-outsider"))
         self.assertIsNone(self.call("開始分析", group="C-outsider"))

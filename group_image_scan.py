@@ -134,8 +134,9 @@ def finish_image(
             return f"📷 已辨識完整牌路 {len(history)} 局，與現有紀錄相同；未重複新增。"
         # Existing BBB analyze_history applies unchanged, with formal Skip
         # and no bankroll input. Compute before mutating the group ledger.
+        audit_snapshot = {}
         direction, tier, report_text = group._research(
-            history, group.analyze_history if predictor is None else predictor)
+            history, group.analyze_history if predictor is None else predictor, capture=audit_snapshot)
         # asyncio.to_thread may continue after wait_for times out. Never
         # commit stale OCR to disk after a timeout/cancellation.
         if cancel_event is not None and cancel_event.is_set():
@@ -145,6 +146,8 @@ def finish_image(
         state["last_simulation_tier"] = tier
         state["pending_tier"] = tier
         group._save(path, data)
+        group._record_audit(state, group_id, str(claim["event_id"]), audit_snapshot,
+                            "ocr_history", path, env)
         # The research result already includes the next hand number.
         # Avoid duplicate OCR banners and the previous long ledger footer.
         return report_text

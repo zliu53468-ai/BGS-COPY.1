@@ -17,7 +17,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from bbb_soft_shoe_runtime import MAX_HANDS, VERSION, analyze_history
+from bbb_soft_shoe_runtime import MAX_HANDS, SOURCE_COMMIT, VERSION, analyze_history
+import prediction_audit as audit
 
 _LOCK = threading.RLock()
 RESULTS = {"紅": "B", "藍": "P", "和": "T",
@@ -178,7 +179,8 @@ def _display_direction(report: Mapping[str, Any], hands: int) -> str:
     return candidate
 
 
-def _research(history: list[str], predictor: Callable[[list[str]], Mapping[str, Any]]) -> tuple[str, int, str]:
+def _research(history: list[str], predictor: Callable[[list[str]], Mapping[str, Any]],
+              *, capture: dict | None = None) -> tuple[str, int, str]:
     report = predictor(history)
     if (report.get("version") != VERSION or report.get("action") != "Skip" or
         report.get("validated_edge") is not False or
@@ -236,7 +238,22 @@ def _research(history: list[str], predictor: Callable[[list[str]], Mapping[str, 
         f"推薦方向：{direction_label}\n"
         f"建議注數：{tier} 注（{unit_label}）"
     )
+    if capture is not None:
+        capture.update(report)
     return direction, tier, msg
+
+
+def _record_audit(state, group_id, event_id, report, source, path, env):
+    try:
+        audit.safe_record(
+            path=audit.database_path(path, env), environ=env,
+            scope=audit.scope_key("group", group_id), shoe=state["run_id"],
+            event_key=event_id, history=state["history"], report=report,
+            direction=state["last_research_direction"], units=state["last_simulation_tier"],
+            scores=state.get("score_records") or [], policy=GROUP_GATE_POLICY,
+            source=source, source_commit=SOURCE_COMMIT)
+    except Exception as exc:
+        print("prediction_audit_error", type(exc).__name__, flush=True)
 
 
 def handle_group_event(
@@ -291,7 +308,7 @@ def handle_group_event(
     scores = parse_group_scores(raw)
     if raw not in RESULTS and raw not in (
         "開始分析", "結束分析", "查詢狀態", "目前狀態", "休息", "暫停分析",
-        "查詢指令", "操作說明", "點數格式", "+", "-",
+        "查詢指令", "操作說明", "點數格式", "查詢成績", "預測成績", "+", "-",
     ) and not parser and scores is None:
         if re.match(r"^(?:[+-]?\d|[閒莊]\s*[:=：]?\s*[+-]?\d)", raw):
             return "⚠️ 點數格式不正確，整則訊息未記錄。\n" + SCORE_HELP
@@ -307,12 +324,14 @@ def handle_group_event(
         # Read-only queries do not need storage or event mutation.
         if raw in ("查詢狀態", "目前狀態"):
             return _status(state, stop)
+        if raw in audit.COMMANDS:
+            return audit.report_text(audit.database_path(path, env), audit.scope_key("group", group_id))
         if raw == "點數格式":
             return SCORE_HELP
         if raw in ("查詢指令", "操作說明"):
             return (
                 "🔐 群組管理員指令\n"
-                "開始分析／結束分析／查詢狀態\n"
+                "開始分析／結束分析／查詢狀態／查詢成績\n"
                 + SCORE_HELP + "\n"
                 "紅=莊、藍=閒、和=和局\n"
                 "+5、-5、+10、-10、+20、-20：手動注數結果\n"
@@ -322,6 +341,7 @@ def handle_group_event(
                 "開啟新場次請輸入「開始分析」\n"
                 "所有注數級距僅為研究模擬。"
             )
+        audit_snapshot = None
         if raw == "開始分析":
             state = groups[group_id] = _fresh_session(state)
             state["active"] = True
@@ -360,8 +380,9 @@ def handle_group_event(
             history.extend(outcomes)
             # Compute before committing the new history: any model failure
             # leaves the state unchanged, with no fabricated prediction.
+            audit_snapshot = {}
             direction, tier, analysis = _research(
-                history, analyze_history if predictor is None else predictor)
+                history, analyze_history if predictor is None else predictor, capture=audit_snapshot)
             state["history"] = history
             if scores is not None:
                 state.setdefault("score_records", []).extend(
@@ -402,4 +423,7 @@ def handle_group_event(
         state.setdefault("processed", []).append(event_id)
         state["processed"] = state["processed"][-MAX_EVENTS:]
         _save(path, data)
+        if audit_snapshot is not None:
+            _record_audit(state, group_id, event_id, audit_snapshot,
+                          "manual_scores" if scores is not None else "manual_bpt", path, env)
         return result
