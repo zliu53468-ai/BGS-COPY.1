@@ -1,8 +1,9 @@
-"""Install isolated LINE group text router on the existing BGS FastAPI app.
+"""Install isolated group/private point routing on the existing BGS app.
 
 Protected app.py remains byte-identical. This wrapper verifies the ORIGINAL
-LINE signature and sends only group commands to the new group research module.
-Individual LINE OCR, sessions and LIFF continue using legacy_app.webhook.
+LINE signature. Groups use their allowlisted path; personal point entry uses
+the original membership guard and its own UID state. Other personal operations,
+OCR and LIFF continue using the original application.
 """
 from __future__ import annotations
 
@@ -19,6 +20,39 @@ from group_text_research import handle_group_event
 from group_image_scan import reserve_image, scan_and_reply_group
 from group_reply_ui import group_message
 import prediction_audit as audit
+import line_private_points as private_points
+
+
+async def _forward_private(legacy_app, original_webhook, payload, events):
+    """Forward already verified user events through the original signed route."""
+    subset = json.dumps({**payload, "events": events}, ensure_ascii=False,
+                        separators=(",", ":")).encode("utf-8")
+    signature = base64.b64encode(hmac.new(
+        legacy_app.CHANNEL_SECRET.encode(), subset, hashlib.sha256).digest()).decode("ascii")
+
+    class VerifiedSubsetRequest:
+        headers = {"X-Line-Signature": signature}
+
+        async def body(self):
+            return subset
+
+    return await original_webhook(VerifiedSubsetRequest())
+
+
+async def _deliver_private_points(legacy_app, event, messages):
+    """Deliver an already-committed private result without rerunning the model."""
+    try:
+        token = str(event.get("replyToken") or "")
+        if token and await asyncio.to_thread(legacy_app._reply, token, messages):
+            return True
+    except Exception as exc:
+        print("private_points_reply_error", type(exc).__name__, flush=True)
+    try:
+        return bool(await asyncio.to_thread(legacy_app._push,
+            str(event["source"]["userId"]), messages, max_retries=0))
+    except Exception as exc:
+        print("private_points_push_error", type(exc).__name__, flush=True)
+        return False
 
 
 async def _deliver_group_text(legacy_app, event, text: str) -> bool:
@@ -99,7 +133,8 @@ def install_group_webhook(app, legacy_app) -> None:
 
         if all(
             (event.get("source") or {}).get("type") == "user"
-            and not is_private_command(event, audit.COMMANDS | {"查詢UID", "我的UID"}) for event in events
+            and not is_private_command(event, audit.COMMANDS | {"查詢UID", "我的UID"})
+            and not private_points.supports(legacy_app, event) for event in events
         ):
             return await original_webhook(request)
 
@@ -153,6 +188,17 @@ def install_group_webhook(app, legacy_app) -> None:
                         f"你的 LINE UID：{uid}\n請在 Render 的 GROUP_ADMIN_UIDS 設定此 UID。"
                     )])
             elif source.get("type") == "user":
+                if private_points.supports(legacy_app, event):
+                    # Preserve input order: an activation/other legacy event
+                    # earlier in the batch must complete before a point start.
+                    if remaining:
+                        await _forward_private(legacy_app, original_webhook, payload, remaining)
+                        remaining = []
+                    messages = await asyncio.to_thread(private_points.handle_event, legacy_app, event)
+                    if messages is not None:
+                        if messages:
+                            await _deliver_private_points(legacy_app, event, messages)
+                        continue
                 remaining.append(event)
 
         if remaining:
@@ -160,20 +206,5 @@ def install_group_webhook(app, legacy_app) -> None:
             # events AFTER verifying the full original LINE signature.
             # This prevents authorized group messages accidentally entering
             # the unmodified personal UID/OCR handler.
-            subset = json.dumps(
-                {**payload, "events": remaining},
-                ensure_ascii=False, separators=(",", ":"),
-            ).encode("utf-8")
-            secret = legacy_app.CHANNEL_SECRET
-            signature = base64.b64encode(
-                hmac.new(secret.encode(), subset, hashlib.sha256).digest()
-            ).decode("ascii")
-
-            class VerifiedSubsetRequest:
-                headers = {"X-Line-Signature": signature}
-
-                async def body(self) -> bytes:
-                    return subset
-
-            return await original_webhook(VerifiedSubsetRequest())
+            return await _forward_private(legacy_app, original_webhook, payload, remaining)
         return JSONResponse({"ok": True})
