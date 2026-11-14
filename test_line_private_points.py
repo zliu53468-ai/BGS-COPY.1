@@ -12,7 +12,7 @@ import threading
 from types import SimpleNamespace
 from typing import Any, Dict
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -61,6 +61,8 @@ class PrivatePointsTests(unittest.TestCase):
             venue_panel=lambda uid: {"type": "text", "text": "請選館"},
             bankroll_panel=lambda uid, session: {"type": "text", "text": "請設定本金"},
             upload_request_panel=lambda uid, session: {"type": "text", "text": "請上傳圖片"},
+            guide_panel=lambda: {"type": "text", "text": "舊版指南"},
+            _start_loading_animation=Mock(return_value=True),
             _request_bankroll=store.request_bankroll,
             _PREDICTION_SLOTS=threading.Semaphore(1),
             AccessExpiredError=type("AccessExpiredError", (Exception,), {}),
@@ -138,7 +140,7 @@ class PrivatePointsTests(unittest.TestCase):
                 "probabilities": {"B": .51, "P": .48, "T": .01},
                 "ev_banker": .0045, "ev_player": -.03,
                 "research_view": {"direction": "SKIP", "eligible": False,
-                                  "abs_ev_gap": .0345, "ev_gap_se": .01, "ev_gap_snr": 3.45,
+                                  "abs_ev_gap": .0345, "ev_gap_se": .025, "ev_gap_snr": 1.38,
                                   "ess_ratio": .9, "ancestor_diversity": 1},
                 "road_aux": {"validated_betting_edge": False}}
 
@@ -167,10 +169,61 @@ class PrivatePointsTests(unittest.TestCase):
         text = panel_text(card)
         self.assertIn("第 2 局", text)
         self.assertNotIn("觀望", text)
-        self.assertIn("模擬注數：5 注", text)
+        self.assertIn("建議注數：5 注", text)
         self.assertNotIn("桌號", text)
         self.assertIn("51.0%", text)
         self.assertFalse(self.forwarded)
+
+    def test_guide_and_all_private_shortcuts_have_only_start_end(self):
+        guide = self.legacy.guide_panel()
+        self.assertEqual(guide["type"], "flex")
+        self.assertIn("使用指南", panel_text(guide))
+        self.assertEqual(guide["contents"]["body"]["backgroundColor"], "#101F19")
+        self.assertNotIn("桌號", panel_text(guide))
+        menu = self.call(action=button_data(guide, "開始分析"))[0]
+        prompt = self.finish_selection()[0]
+        with patch.object(group, "analyze_history", side_effect=self.fake_model):
+            result = self.call("84")[0]
+        for card in (guide, menu, prompt, result, private.message("測試")):
+            actions = [item["action"]["text"] for item in card["quickReply"]["items"]]
+            self.assertEqual(actions, ["開始分析", "結束分析"])
+
+    def test_loading_only_for_valid_private_work_and_failure_never_blocks_reply(self):
+        self.start()
+        loading = self.legacy._start_loading_animation
+        with patch.object(group, "analyze_history", side_effect=self.fake_model) as model:
+            self.call("10,4")
+            loading.assert_not_called()
+            loading.side_effect = TimeoutError("loading failed")
+            card = self.call("84", event_id="animated")[0]
+            self.assertEqual(card["type"], "flex")
+            self.assertEqual(self.call("84", event_id="animated"), [])
+            loading.assert_called_once_with("U-one", 10)
+            model.assert_called_once()
+            store.upsert_session("U-one", {"permanent_access": False, "trial_started_at": 1, "access_until": 2})
+            self.assertIn("試用已到期", self.call("38")[0]["text"])
+            loading.assert_called_once()
+
+    def test_private_5_10_watch_one_clear_previous_units_without_resetting_history(self):
+        self.start()
+        def grade(history):
+            report = self.fake_model(history)
+            if len(history) == 2:
+                report["research_view"].update(ev_gap_se=.01, ev_gap_snr=3.45)
+            elif len(history) == 3:
+                report["research_view"]["ess_ratio"] = .29
+            return report
+        run = self.session()["analysis_run_id"]
+        with patch.object(group, "analyze_history", side_effect=grade):
+            for units in (5, 10, 0, 5):
+                card = self.call("84")[0]
+                self.assertIn(f"建議注數：{units} 注", panel_text(card))
+                self.assertNotIn("模擬注數", panel_text(card))
+                self.assertNotIn("觀望", panel_text(card))
+                self.assertEqual("看一局" in panel_text(card), units == 0)
+                self.assertEqual(self.session()["screen_last_prediction"]["simulation_tier"], units)
+        self.assertEqual(self.session()["raw_outcomes"], list("PPPP"))
+        self.assertEqual(self.session()["analysis_run_id"], run)
 
     def test_real_engine_flex_matches_group_forecast_for_entire_shoe_prefix(self):
         self.start()
@@ -180,7 +233,7 @@ class PrivatePointsTests(unittest.TestCase):
             self.assertEqual(actual["type"], "flex")
             self.assertEqual(self.session()["private_points_text"], wanted)
             self.assertNotIn("觀望", panel_text(actual))
-            self.assertIn(f"模擬注數：{tier} 注", panel_text(actual))
+            self.assertIn(f"建議注數：{tier} 注", panel_text(actual))
             pred = self.session()["screen_last_prediction"]
             self.assertEqual(pred["bbb_soft_shoe"]["report"], group.analyze_history(list(expected)))
             self.assertEqual((pred["direction"], pred["simulation_tier"]), (direction, tier))
@@ -191,7 +244,7 @@ class PrivatePointsTests(unittest.TestCase):
         with patch.object(group, "analyze_history", side_effect=self.fake_model) as model:
             card = self.call("84")[0]
             before = self.session()
-            prompt = self.call(action=button_data(card, "繼續分析"))[0]
+            prompt = self.call("繼續分析")[0]
             self.assertIn("請輸入閒莊點數", panel_text(prompt))
             self.assertEqual(self.session()["raw_outcomes"], before["raw_outcomes"])
             self.assertEqual(self.session()["analysis_run_id"], before["analysis_run_id"])
@@ -289,7 +342,7 @@ class PrivatePointsTests(unittest.TestCase):
         self.assertEqual(current["screen_last_prediction"]["simulation_tier"], 5)
         self.assertEqual(current["screen_last_prediction"]["bbb_soft_shoe"]["report"], weak(list("PBTB")))
         with patch.object(group, "analyze_history", side_effect=self.fake_model):
-            self.assertIn("模擬注數：5 注", panel_text(self.call("38")[0]))
+            self.assertIn("建議注數：5 注", panel_text(self.call("38")[0]))
         cohorts = audit.summarize(audit.database_path(self.path), audit.scope_key("user", "U-one"))["cohorts"]
         self.assertEqual(len(cohorts), 2)
         self.assertEqual({c["policy"] for c in cohorts}, {private.POLICY, private.AUDIT_POLICY})

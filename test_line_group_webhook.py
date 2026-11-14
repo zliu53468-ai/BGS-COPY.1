@@ -178,7 +178,9 @@ class WebhookRouteTests(unittest.TestCase):
             report = {"version": VERSION, "action": "Skip", "validated_edge": False,
                       "bankroll_fraction": 0, "probabilities": {"B": .51, "P": .48, "T": .01},
                       "observations": 1, "candidate": "B", "ev_banker": .0045, "ev_player": -.03,
-                      "research_view": {"direction": "B", "eligible": True},
+                      "research_view": {"direction": "B", "eligible": True,
+                                        "abs_ev_gap": .0345, "ev_gap_se": .025, "ev_gap_snr": 1.38,
+                                        "ess_ratio": .9, "ancestor_diversity": 1},
                       "road_aux": {"validated_betting_edge": False}}
             result = self.event(source, "hand-1", "閒3莊5")
             with patch("group_text_research.analyze_history", return_value=report) as model, \
@@ -190,7 +192,7 @@ class WebhookRouteTests(unittest.TestCase):
             self.assertEqual(self.stub.pushes[0][0], "C-good")
             self.assertIn("第 2 局", self.stub.pushes[0][1][0]["text"])
             self.assertNotIn("觀望", self.stub.pushes[0][1][0]["text"])
-            self.assertIn("5 注（模擬，固定最低級距）", self.stub.pushes[0][1][0]["text"])
+            self.assertIn("5 注", self.stub.pushes[0][1][0]["text"])
             state = json.loads((Path(directory) / "group.json").read_text())["groups"]["C-good"]
             self.assertEqual(state["history"], ["B"])
 

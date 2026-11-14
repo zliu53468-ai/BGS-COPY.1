@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from group_text_research import (
     VERSION, _display_direction, _kelly_simulation, parse_group_scores,
-    _research, handle_group_event,
+    _research, handle_group_event, _display_policy, DISPLAY_GATE_THRESHOLDS,
 )
 
 
@@ -52,9 +52,11 @@ class GroupTextResearchTests(unittest.TestCase):
             "version": VERSION, "action": "Skip",
             "validated_edge": False, "bankroll_fraction": 0,
             "observations": len(history), "candidate": "B",
-            "ev_banker": .307, "ev_player": -.34,
-            "probabilities": {"B": .66, "P": .32, "T": .02},
+            "ev_banker": -.004, "ev_player": -.02,
+            "probabilities": {"B": .48, "P": .46, "T": .06},
             "research_view": {
+                "abs_ev_gap": .016, "ev_gap_se": .01, "ev_gap_snr": 1.6,
+                "ess_ratio": .9, "ancestor_diversity": 1,
                 "eligible": True, "direction": "B",
                 "road_confirmed": True, "road_conflict": False,
             },
@@ -127,7 +129,7 @@ class GroupTextResearchTests(unittest.TestCase):
         message = self.call("紅")
         self.assertIn("第 2 局", message)
         self.assertIn("推薦方向：🔴 莊", message)
-        self.assertIn("建議注數：5 注（模擬）", message)
+        self.assertIn("建議注數：5 注", message)
         self.assertEqual(len(message.splitlines()), 3)
         self.assertEqual(self.state()["net_units"], 0)
 
@@ -136,7 +138,7 @@ class GroupTextResearchTests(unittest.TestCase):
         msg = self.call("紅")
         self.assertIn("第 2 局", msg)
         self.assertIn("推薦方向：🔴 莊", msg)
-        self.assertIn("建議注數：5 注（模擬）", msg)
+        self.assertIn("建議注數：5 注", msg)
         self.assertEqual(len(msg.splitlines()), 3)
         self.assertIn("第 3 局", self.call("藍"))
         self.assertIn("第 4 局", self.call("和"))
@@ -192,6 +194,33 @@ class GroupTextResearchTests(unittest.TestCase):
             [-5, 5],
         )
 
+    def test_watch_one_zeroes_pending_tier_and_can_resume_with_ten(self):
+        self.call("開始分析")
+        self.call("紅")
+        self.assertEqual(self.state()["pending_tier"], 5)
+        def weak(history):
+            report = self.predictor(history)
+            report["research_view"]["ess_ratio"] = .29
+            return report
+        reply = handle_group_event(self.event("藍"), environ=self.env,
+                                   predictor=weak, state_path=self.path)
+        self.assertIn("看一局", reply)
+        self.assertIn("建議注數：0 注", reply)
+        self.assertEqual(self.state()["pending_tier"], 0)
+        self.assertIn("沒有待結算", self.call("+"))
+        def strong(history):
+            report = self.predictor(history)
+            report.update(probabilities={"B": .51, "P": .48, "T": .01},
+                          ev_banker=.0045, ev_player=-.03)
+            report["research_view"].update(abs_ev_gap=.0345, ev_gap_se=.01, ev_gap_snr=3.45)
+            return report
+        reply = handle_group_event(self.event("和"), environ=self.env,
+                                   predictor=strong, state_path=self.path)
+        self.assertIn("建議注數：10 注", reply)
+        self.assertEqual(self.state()["pending_tier"], 10)
+        self.assertEqual(self.state()["history"], list("BPT"))
+        self.assertEqual(self.state()["net_units"], 0)
+
     def test_reject_invalid_and_fail_closed_on_wager(self):
         self.call("開始分析")
         self.assertIsNone(self.call("隨便聊天"))
@@ -221,7 +250,7 @@ class GroupTextResearchTests(unittest.TestCase):
             self.event("紅"), environ=self.env,
             predictor=b_direction, state_path=self.path)
         self.assertIn("推薦方向：🔴 莊", result)
-        self.assertIn("建議注數：5 注（模擬）", result)
+        self.assertIn("建議注數：5 注", result)
         self.assertEqual(self.state()["last_research_direction"], "B")
 
     def test_research_skip_shows_original_candidate_when_not_eligible(self):
@@ -237,7 +266,7 @@ class GroupTextResearchTests(unittest.TestCase):
             predictor=skip_direction, state_path=self.path)
         self.assertIn("推薦方向：🔴 莊", result)
         self.assertNotIn("觀望", result)
-        self.assertIn("建議注數：5 注（模擬）", result)
+        self.assertIn("建議注數：5 注", result)
         self.assertEqual(self.state()["last_research_direction"], "B")
 
     def test_kelly_calculation_floored_to_tiers(self):
@@ -313,12 +342,12 @@ class GroupTextResearchTests(unittest.TestCase):
             predictor=low_tier, state_path=self.path)
         self.assertIn("推薦方向：🔴 莊", msg)
         self.assertNotIn("推薦方向：⚪ 觀望", msg)
-        self.assertIn("建議注數：5 注（模擬，固定最低級距）", msg)
+        self.assertIn("建議注數：5 注", msg)
         self.assertEqual(len(msg.splitlines()), 3)
         self.assertEqual(self.state()["last_research_direction"], "B")
         self.assertEqual(self.state()["pending_tier"], 5)
         self.assertEqual(self.state()["last_simulation_tier"], 5)
-        self.assertIn("上次模擬注數：5 注", self.call("查詢狀態"))
+        self.assertIn("上次建議注數：5 注", self.call("查詢狀態"))
         self.assertIn("+5", self.call("+"))
         self.assertIn("沒有待結算", self.call("+"))
 
@@ -345,7 +374,7 @@ class GroupTextResearchTests(unittest.TestCase):
             self.assertEqual(self.state()["history"], [])
             self.assertEqual(self.state()["pending_tier"], 0)
 
-    def test_text_only_real_engine_shows_candidate_from_first_result(self):
+    def test_text_only_real_engine_has_explicit_zero_units_for_weak_signal(self):
         self.call("開始分析")
         for number in range(1, 4):
             result = handle_group_event(self.event("莊"), environ=self.env,
@@ -353,7 +382,8 @@ class GroupTextResearchTests(unittest.TestCase):
             self.assertIn(f"第 {number + 1} 局", result)
             self.assertEqual(len(result.splitlines()), 3)
             self.assertNotIn("觀望", result)
-            self.assertIn("建議注數：5 注（模擬，固定最低級距）", result)
+            self.assertIn("建議注數：0 注" if number == 1 else "建議注數：5 注", result)
+            self.assertEqual("看一局" in result, number == 1)
         self.assertEqual(self.state()["history"], list("BBB"))
 
     def test_research_skip_reasons_do_not_hide_valid_candidate(self):
@@ -373,7 +403,7 @@ class GroupTextResearchTests(unittest.TestCase):
         self.assertIn("推薦方向：🔴 莊", msg)
         self.assertNotIn("觀望", msg)
         self.assertEqual(len(msg.splitlines()), 3)
-        self.assertIn("建議注數：5 注（模擬）", msg)
+        self.assertIn("建議注數：5 注", msg)
         self.assertEqual(self.state()["last_research_direction"], "B")
 
     def test_real_bgs_adapter_preserves_existing_nonborderline_directions(self):
@@ -390,7 +420,8 @@ class GroupTextResearchTests(unittest.TestCase):
                 report = analyze_history(history)
                 adapter = predict_screen(history)
                 direction, tier, message = _research(history, lambda _: report)
-                self.assertEqual(direction, report["candidate"])
+                self.assertIn(direction, (report["candidate"], "SKIP"))
+                self.assertEqual(tier == 0, direction == "SKIP")
                 self.assertEqual(report["research_view"], adapter["research_view"])
                 self.assertEqual(len(message.splitlines()), 3)
                 self.assertIn(f"📊 第 {len(history) + 1} 局", message)
@@ -531,16 +562,16 @@ class GroupTextResearchTests(unittest.TestCase):
                 self.assertEqual(prefix, "group_research_gate")
                 record = json.loads(payload)
                 self.assertEqual(record["repository_commit"], "a" * 40)
-                self.assertEqual(record["research_direction"], report["candidate"])
-                self.assertEqual(record["eligible"], report["research_view"]["eligible"])
-                self.assertEqual(record["reasons"], report["research_view"]["reasons"])
+                self.assertEqual(record["research_direction"], actual[0])
+                self.assertEqual(record["eligible"], actual[0] != "SKIP")
+                self.assertEqual(record["core_eligible"], report["research_view"]["eligible"])
+                self.assertEqual(record["core_reasons"], report["research_view"]["reasons"])
                 self.assertEqual(record["kelly_tier"], 0)
-                self.assertEqual(record["display_tier"], 5)
-                if len(history) == 3:
-                    self.assertEqual(record["tier_basis"], "fixed_minimum")
+                self.assertEqual(record["display_tier"], actual[1])
+                self.assertEqual(record["tier_basis"], "watch_one" if actual[1] == 0 else f"signal_{actual[1]}")
                 for key, value in record["gate_metrics"].items():
                     self.assertEqual(value, report["research_view"][key])
-                self.assertEqual(record["gate_thresholds"], {})
+                self.assertEqual(record["gate_thresholds"], DISPLAY_GATE_THRESHOLDS)
                 for key, value in record["core_gate_thresholds"].items():
                     self.assertEqual(value, report["config"][key])
                 self.assertNotIn("do-not-log", payload)
@@ -551,7 +582,7 @@ class GroupTextResearchTests(unittest.TestCase):
 
 
 class GroupCandidateTests(unittest.TestCase):
-    def test_all_valid_core_candidates_display_without_mutation(self):
+    def test_light_filter_never_flips_candidate_or_mutates_original_report(self):
         from bbb_soft_shoe_runtime import analyze_history, predict_screen
         # Include first-hand, ties, strong signals and formerly blocked histories.
         for raw in ("B", "P", "T", "BB", "TT", "BBB", "BBBBBBBB",
@@ -561,9 +592,9 @@ class GroupCandidateTests(unittest.TestCase):
                 report = analyze_history(history)
                 original = copy.deepcopy(report)
                 direction, tier, message = _research(history, lambda _: report)
-                self.assertEqual(direction, report["candidate"])
-                self.assertIn(direction, ("B", "P"))
-                self.assertIn(tier, (5, 10, 20))
+                self.assertIn(direction, (report["candidate"], "SKIP"))
+                self.assertIn(tier, (0, 5, 10))
+                self.assertEqual(tier == 0, direction == "SKIP")
                 self.assertNotIn("觀望", message)
                 self.assertEqual(report, original)
                 self.assertEqual(predict_screen(history)["research_view"], report["research_view"])
@@ -581,9 +612,56 @@ class GroupCandidateTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             _display_direction({**good, "observations": 0}, 0)
 
-    def test_ev_tie_keeps_original_core_tie_break(self):
+    def test_ev_tie_does_not_force_a_display_direction(self):
         self.assertEqual(_display_direction({"observations": 1, "candidate": "B",
-                                            "ev_banker": 0, "ev_player": 0}, 1), "B")
+                                            "ev_banker": 0, "ev_player": 0}, 1), "SKIP")
+
+
+class LightGateTierTests(unittest.TestCase):
+    def report(self, *, gap=.0345, se=.01, ev=.0045, side="B"):
+        return {"observations": 1, "candidate": side,
+                "ev_banker": ev if side == "B" else ev-gap,
+                "ev_player": ev-gap if side == "B" else ev,
+                "research_view": {"abs_ev_gap": gap, "ev_gap_se": se,
+                                  "ev_gap_snr": gap/se, "ess_ratio": .9,
+                                  "ancestor_diversity": 1}}
+
+    def test_ten_requires_positive_ev_and_healthy_separated_signal(self):
+        for side in ("B", "P"):
+            strong = self.report(side=side)
+            self.assertEqual(_display_policy(strong, 1)["units"], 10)
+            for kwargs in ({"ev": 0}, {"ev": -.001}, {"se": .03}):
+                self.assertEqual(_display_policy(self.report(side=side, **kwargs), 1)["units"], 5)
+            for key, value in (("ess_ratio", .49), ("ancestor_diversity", .34)):
+                report = self.report(side=side)
+                report["research_view"][key] = value
+                self.assertEqual(_display_policy(report, 1)["units"], 5)
+
+    def test_light_gate_boundary_and_no_mandatory_warmup(self):
+        # Controlled gate fixture, not a claim about real-shoe win probability.
+        report = self.report(gap=.002, se=.002/.35, ev=.002)
+        report["research_view"].update(ess_ratio=.30, ancestor_diversity=.15)
+        self.assertEqual(_display_policy(report, 1)["units"], 5)
+        for key, value in (("ess_ratio", .299), ("ancestor_diversity", .149)):
+            changed = copy.deepcopy(report)
+            changed["research_view"][key] = value
+            self.assertEqual(_display_policy(changed, 1)["units"], 0)
+        self.assertEqual(_display_policy(self.report(gap=.00199, se=.001, ev=.00199), 1)["units"], 0)
+        self.assertEqual(_display_policy(self.report(gap=.003, se=.003/.349), 1)["units"], 0)
+        self.assertEqual(_display_policy(self.report(gap=.08, se=.07001), 1)["units"], 0)
+
+    def test_bad_diagnostics_fail_closed_without_mutating_core(self):
+        for key in ("abs_ev_gap", "ev_gap_se", "ev_gap_snr", "ess_ratio", "ancestor_diversity"):
+            for bad in (None, float("inf"), -1, True):
+                report = self.report()
+                report["research_view"][key] = bad
+                original = copy.deepcopy(report)
+                result = _display_policy(report, 1)
+                self.assertEqual((result["direction"], result["units"]), ("SKIP", 0))
+                self.assertEqual(report, original)
+        report = self.report()
+        report["research_view"]["ev_gap_snr"] = 999
+        self.assertEqual(_display_policy(report, 1)["reason"], "inconsistent_gate_metrics")
 
 
 if __name__ == "__main__":

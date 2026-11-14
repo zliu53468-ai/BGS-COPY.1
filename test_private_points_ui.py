@@ -27,19 +27,20 @@ class PrivatePointsUITests(unittest.TestCase):
         panel = ui.result_panel(report, "P", 5, 61, "run-1")
         text = [n["text"] for n in nodes(panel) if n.get("type") == "text"]
         self.assertEqual(report, original)
-        for value in ("第 61 局", "46.0%", "45.0%", "9.0%", "模型估計機率：45.0%", "模擬注數：5 注"):
+        for value in ("第 61 局", "46.0%", "45.0%", "9.0%", "模型估計機率：45.0%", "建議注數：5 注"):
             self.assertIn(value, text)
         for forbidden in ("桌號", "倒數", "最高比例", "觀望"):
             self.assertNotIn(forbidden, json.dumps(panel, ensure_ascii=False))
         self.assertEqual([n["width"] for n in nodes(panel) if "width" in n], ["46.0%", "45.0%", "9.0%"])
         actions = [parse_qs(n["data"]) for n in nodes(panel) if n.get("type") == "postback"]
-        self.assertEqual([a["action"][0] for a in actions], ["points_continue", "points_end"])
-        self.assertTrue(all(a["run"] == ["run-1"] for a in actions))
+        self.assertEqual([a["action"][0] for a in actions], ["points_menu", "points_end"])
+        self.assertTrue(all(a["run"] == ["run-1"] for a in actions if "run" in a))
 
     def test_flex_payload_limits_and_supported_actions(self):
-        panels = [ui.venue_panel([{"code": "DG", "name": "DG真人"}, {"code": "MT", "name": "MT真人"}], "flow"),
+        panels = [ui.guide_panel(), ui.result_panel(self.report(), "SKIP", 0, 2, "run"),
+                  ui.venue_panel([{"code": "DG", "name": "DG真人"}, {"code": "MT", "name": "MT真人"}], "flow"),
                   ui.game_panel("DG真人", "DG", "flow"), ui.input_panel("run"),
-                  ui.result_panel(self.report(), "B", 20, 72, "run"), ui.ended_panel()]
+                  ui.result_panel(self.report(), "B", 10, 72, "run"), ui.ended_panel()]
         for panel in panels:
             self.assertEqual(panel["type"], "flex")
             self.assertTrue(0 < len(panel["altText"]) <= 400)
@@ -71,7 +72,16 @@ class PrivatePointsUITests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 ui.result_panel({"probabilities": probabilities}, "B", 5, 2, "run")
         with self.assertRaises(ValueError):
-            ui.result_panel(self.report(), "SKIP", 0, 2, "run")
+            ui.result_panel(self.report(), "SKIP", 5, 2, "run")
+
+    def test_watch_one_has_zero_units_and_no_invented_side_probability(self):
+        card = ui.result_panel(self.report(), "SKIP", 0, 42, "run")
+        text = "\n".join(n["text"] for n in nodes(card) if n.get("type") == "text")
+        self.assertIn("看一局", text)
+        self.assertIn("建議注數：0 注", text)
+        self.assertNotIn("觀望", text)
+        self.assertNotIn("模擬", text)
+        self.assertNotIn("模型估計機率：", text)
 
 
 if __name__ == "__main__":

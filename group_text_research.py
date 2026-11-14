@@ -28,10 +28,14 @@ RESULT_ALIASES = {
     "B": "紅", "P": "藍", "T": "和",
     "🔴莊": "紅", "🔵閒": "藍", "🟢和": "和",
 }
-SIDE_LABEL = {"B": "🔴 莊", "P": "🔵 閒", "T": "🟢 和", "SKIP": "尚未產生"}
+SIDE_LABEL = {"B": "🔴 莊", "P": "🔵 閒", "T": "🟢 和", "SKIP": "⚪ 看一局"}
 ALLOWED_UNITS = (5, 10, 20)
 MAX_EVENTS = 200
-GROUP_GATE_POLICY = "COPY_ALWAYS_CANDIDATE_V2"
+GROUP_GATE_POLICY = "COPY_LIGHT_GATE_5_10_N512_V1"
+DISPLAY_GATE_THRESHOLDS = {"min_gap": .002, "min_snr": .35, "min_ess": .30,
+                           "min_diversity": .15, "max_se": .070}
+TEN_UNIT_THRESHOLDS = {"min_gap": .012, "min_snr": 1.5, "min_ess": .50,
+                       "min_diversity": .35, "min_ev_exclusive": 0.0}
 GATE_KEYS = (
     "MIN_DIRECTION_ROUNDS", "MIN_DIRECTION_EV_GAP", "MIN_DIRECTION_GAP_SNR",
     "MIN_DIRECTION_ESS_RATIO", "MIN_DIRECTION_DIVERSITY", "MAX_DIRECTION_GAP_SE",
@@ -134,8 +138,8 @@ def _status(state: Mapping[str, Any], stop: int) -> str:
         f"累計：{int(state.get('net_units', 0)):+d} 注（管理員手動紀錄）\n"
         f"休息門檻：{stop} 注\n"
         f"已記錄牌局：{len(state.get('history', []))} 局\n"
-        f"上次研究方向：{SIDE_LABEL.get(state.get('last_research_direction'), '尚未產生')}\n"
-        f"上次模擬注數：{int(state.get('last_simulation_tier', state.get('pending_tier', 0)) or 0)} 注\n"
+        f"上次研究方向：{SIDE_LABEL.get(state.get('last_research_direction'), '尚未產生') if state.get('history') else '尚未產生'}\n"
+        f"上次建議注數：{int(state.get('last_simulation_tier', state.get('pending_tier', 0)) or 0)} 注\n"
     )
 
 
@@ -163,7 +167,7 @@ def _kelly_simulation(report: Mapping[str, Any], side: str) -> tuple[int, float]
     return tier, fractional
 
 
-def _display_direction(report: Mapping[str, Any], hands: int) -> str:
+def _core_candidate(report: Mapping[str, Any], hands: int) -> str:
     """Show the unchanged core candidate, regardless of research-display gates.
 
     Invalid/missing predictions are errors, never invented B/P recommendations.
@@ -180,6 +184,55 @@ def _display_direction(report: Mapping[str, Any], hands: int) -> str:
     return candidate
 
 
+def _display_policy(report: Mapping[str, Any], hands: int) -> dict[str, Any]:
+    """Light display filter and bounded 5/10 tiers, not a validated wager edge.
+
+    Only original estimates are read. No loss chasing, forced alternation,
+    model mutation or road override. A positive estimated EV is required for
+    10 units; it is still not evidence of a calibrated or profitable strategy.
+    """
+    side = _core_candidate(report, hands)
+    view = report.get("research_view") or {}
+    metrics = {k: view.get(k) for k in ("abs_ev_gap", "ev_gap_se", "ev_gap_snr",
+                                      "ess_ratio", "ancestor_diversity")}
+    reasons = []
+    valid = all(type(v) in (int, float) and math.isfinite(v) and v >= 0 for v in metrics.values())
+    if not valid or not 0 < metrics["ev_gap_se"] or metrics["ess_ratio"] > 1 or metrics["ancestor_diversity"] > 1:
+        reasons.append("invalid_gate_metrics")
+    elif (not math.isclose(metrics["abs_ev_gap"], abs(report["ev_banker"] - report["ev_player"]),
+                           rel_tol=1e-6, abs_tol=1e-12) or
+          not math.isclose(metrics["ev_gap_snr"], metrics["abs_ev_gap"] / metrics["ev_gap_se"],
+                           rel_tol=1e-6, abs_tol=1e-12)):
+        reasons.append("inconsistent_gate_metrics")
+    else:
+        g = DISPLAY_GATE_THRESHOLDS
+        for failed, reason in (
+            (metrics["abs_ev_gap"] < g["min_gap"], "weak_ev_separation"),
+            (metrics["ev_gap_snr"] < g["min_snr"], "low_gap_to_noise"),
+            (metrics["ess_ratio"] < g["min_ess"], "low_particle_ess"),
+            (metrics["ancestor_diversity"] < g["min_diversity"], "low_particle_diversity"),
+            (metrics["ev_gap_se"] > g["max_se"], "high_estimator_uncertainty"),
+        ):
+            if failed:
+                reasons.append(reason)
+    units = 0
+    if not reasons:
+        t = TEN_UNIT_THRESHOLDS
+        ev = report["ev_banker" if side == "B" else "ev_player"]
+        strong = (metrics["abs_ev_gap"] >= t["min_gap"] and metrics["ev_gap_snr"] >= t["min_snr"]
+                  and metrics["ess_ratio"] >= t["min_ess"]
+                  and metrics["ancestor_diversity"] >= t["min_diversity"]
+                  and ev > t["min_ev_exclusive"])
+        units = 10 if strong else 5
+    return {"direction": "SKIP" if reasons else side, "units": units,
+            "metrics": metrics, "reasons": reasons,
+            "reason": reasons[0] if reasons else "light_gate_pass"}
+
+
+def _display_direction(report: Mapping[str, Any], hands: int) -> str:
+    return _display_policy(report, hands)["direction"]
+
+
 def _research(history: list[str], predictor: Callable[[list[str]], Mapping[str, Any]],
               *, capture: dict | None = None) -> tuple[str, int, str]:
     report = predictor(history)
@@ -188,7 +241,8 @@ def _research(history: list[str], predictor: Callable[[list[str]], Mapping[str, 
         report.get("bankroll_fraction") != 0):
         raise RuntimeError("安全鎖定：BBB 正式下注閘門與研究版本不一致")
     core_view = report.get("research_view") or {}
-    direction = _display_direction(report, len(history))
+    policy = _display_policy(report, len(history))
+    direction = policy["direction"]
     road = report.get("road_aux") or {}
     if road.get("validated_betting_edge") is not False:
         raise RuntimeError("安全鎖定：牌路不得授權正式下注")
@@ -196,12 +250,10 @@ def _research(history: list[str], predictor: Callable[[list[str]], Mapping[str, 
     if (not all(type(value) in (int, float) and math.isfinite(value)
                 and value >= 0 for value in pair)
             or not 0 < sum(pair) <= 1.0000001):
-        raise RuntimeError("模型機率資料無效，未產生固定模擬注數")
+        raise RuntimeError("模型機率資料無效，未產生建議注數")
     kelly_tier, _fractional = _kelly_simulation(report, direction)
-    # User-requested display minimum, separate from the unchanged Kelly result
-    # and formal wager gate. Every valid displayed candidate has a tier.
-    tier = max(ALLOWED_UNITS[0], kelly_tier)
-    fixed_minimum = tier > kelly_tier
+    # Kelly remains diagnostic only. User-requested tiers are bounded to 0/5/10.
+    tier = policy["units"]
     # Keep core forecasts and the formal wager gate intact. The shared
     # display policy is logged separately from the original research decision.
     # This diagnostic logs NO chat ID, UID, screenshot, or personal history.
@@ -214,30 +266,31 @@ def _research(history: list[str], predictor: Callable[[list[str]], Mapping[str, 
             "core_research_direction": core_view.get("direction", "SKIP"),
             "core_reasons": list(core_view.get("reasons") or []),
             "research_direction": direction,
-            "eligible": core_view.get("eligible") is True,
-            "display_basis": "core_candidate",
-            "reason": str(core_view.get("reason") or report.get("reason") or "")[:64],
-            "reasons": list(core_view.get("reasons") or []),
+            "eligible": direction != "SKIP",
+            "core_eligible": core_view.get("eligible") is True,
+            "display_basis": "core_candidate_with_light_gate",
+            "reason": policy["reason"],
+            "reasons": policy["reasons"],
             # All metrics are the original core estimates.
             "gate_metrics": {key: core_view.get(key) for key in (
                 "abs_ev_gap", "ev_gap_se", "ev_gap_snr", "ess_ratio",
                 "ancestor_diversity",
             )},
-            "gate_thresholds": {},
+            "gate_thresholds": dict(DISPLAY_GATE_THRESHOLDS),
+            "ten_unit_thresholds": dict(TEN_UNIT_THRESHOLDS),
             "core_gate_thresholds": {key: (report.get("config") or {}).get(key)
                                      for key in GATE_KEYS},
             "kelly_tier": kelly_tier,
             "display_tier": tier,
-            "tier_basis": "fixed_minimum" if fixed_minimum else "kelly",
+            "tier_basis": "watch_one" if tier == 0 else f"signal_{tier}",
         }, ensure_ascii=False, separators=(",", ":")), flush=True)
     direction_label = SIDE_LABEL[direction]
-    unit_label = "模擬，固定最低級距" if fixed_minimum else "模擬"
     # Three short lines only. The number is the next hand being forecast;
     # units are research simulations, NEVER real-money stake authorizations.
     msg = (
         f"📊 第 {len(history) + 1} 局\n"
         f"推薦方向：{direction_label}\n"
-        f"建議注數：{tier} 注（{unit_label}）"
+        f"建議注數：{tier} 注"
     )
     if capture is not None:
         capture.update(report)

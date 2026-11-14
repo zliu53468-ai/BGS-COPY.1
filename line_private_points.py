@@ -51,14 +51,26 @@ def supports(legacy, event) -> bool:
 
 
 def message(text):
-    buttons = [("▶ 開始分析", "開始分析"), ("✍ 點數格式", "點數格式"),
-               ("📊 查詢狀態", "查詢狀態"), ("📈 查詢成績", "查詢成績"),
-               ("📷 圖片模式", "圖片模式"), ("⏹ 結束分析", "結束分析")]
+    buttons = [("🟢 開始分析", "開始分析"), ("🔴 結束分析", "結束分析")]
     result = dict(text) if isinstance(text, dict) else {"type": "text", "text": text[:5000]}
     result["quickReply"] = {"items": [
         {"type": "action", "action": {"type": "message", "label": label, "text": command}}
         for label, command in buttons]}
     return result
+
+
+def guide_message():
+    return message(ui.guide_panel())
+
+
+def _loading(legacy, uid):
+    """Native private-chat animation; valid work continues if LINE rejects it."""
+    starter = getattr(legacy, "_start_loading_animation", None)
+    if callable(starter):
+        try:
+            starter(uid, 10)
+        except Exception as exc:
+            print("private_points_loading_error", type(exc).__name__, flush=True)
 
 
 def _owned(session):
@@ -182,6 +194,7 @@ def _evaluate(legacy, uid, event_id, pairs, outcome):
         history = before + outcomes
         if len(history) > group.MAX_HANDS:
             raise ValueError("本次輸入會超過 72 局上限，整則訊息未記錄；請重新開始分析。")
+        _loading(legacy, uid)
         if not legacy._PREDICTION_SLOTS.acquire(timeout=5):
             raise TimeoutError("目前分析人數較多，請稍後再試。")
         try:

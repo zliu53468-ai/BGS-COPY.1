@@ -9,12 +9,14 @@ const frozen=require("./soft_shoe_frozen_lstm_runtime.js");
 require("./soft_shoe_frozen_model_bundle.js");
 const SOURCE_COMMIT="ce34c8be77df4fc5922a59454daf3dc22d1a1898";
 const CORE_BLOB="13ee5a6f829d451b4c156935a9401680a705311b";
+// COPY-specific sampling profile; upstream engine bytes and rules stay locked.
+const COPY_PARAMETERS=Object.freeze({PARTICLE_COUNT:512,LIKELIHOOD_DRAWS:96,NEXT_HAND_DRAWS:192});
 function evaluate(input){
  if(!input||!Array.isArray(input.history)||
     input.history.some(x=>!["B","P","T"].includes(x)))
   throw Error("invalid_bpt_history");
- // Do not use LINE UID as a model seed: identical BPT input matches BBB web.
- const report=core.run(input.history,{},global.BBB_SOFT_SHOE_XGB_MODEL,
+ // Same history + profile gives the same result; never seed from LINE UID.
+ const report=core.run(input.history,COPY_PARAMETERS,global.BBB_SOFT_SHOE_XGB_MODEL,
   frozen,global.BBB_SOFT_SHOE_LSTM_MODEL);
  if(report.version!==core.VERSION)throw Error("unexpected_bbb_core_version");
  if(!roadAux||typeof roadAux.analyze!=="function"||
@@ -34,4 +36,4 @@ rl.on("line",line=>{
  catch(e){response={ok:false,error:String(e?.message||e).slice(0,250)};}
  process.stdout.write(JSON.stringify(response)+"\n");
 });
-module.exports={evaluate,SOURCE_COMMIT,CORE_BLOB};
+module.exports={evaluate,SOURCE_COMMIT,CORE_BLOB,COPY_PARAMETERS};

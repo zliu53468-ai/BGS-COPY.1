@@ -87,6 +87,8 @@ async def _deliver_group_text(legacy_app, event, text: str) -> bool:
 
 
 def install_group_webhook(app, legacy_app) -> None:
+    if hasattr(legacy_app, "guide_panel"):
+        legacy_app.guide_panel = private_points.guide_message
     if getattr(legacy_app, "store", None) is not None:
         audit.install_store_observer(legacy_app.store)
     original_webhook = legacy_app.webhook

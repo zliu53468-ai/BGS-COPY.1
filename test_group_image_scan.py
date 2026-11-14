@@ -51,10 +51,10 @@ class GroupOCRTests(unittest.TestCase):
             "version": VERSION, "action": "Skip",
             "validated_edge": False, "bankroll_fraction": 0,
             "observations": len(history), "candidate": "B",
-            "ev_banker": .307, "ev_player": -.34,
-            "probabilities": {"B": .66, "P": .32, "T": .02},
+            "ev_banker": -.004, "ev_player": -.02,
+            "probabilities": {"B": .48, "P": .46, "T": .06},
             "research_view": {
-                "abs_ev_gap": .647, "ev_gap_se": .01, "ev_gap_snr": 64.7,
+                "abs_ev_gap": .016, "ev_gap_se": .01, "ev_gap_snr": 1.6,
                 "ess_ratio": .9, "ancestor_diversity": 1,
                 "eligible": True, "direction": "B", "road_confirmed": True},
             "road_aux": {
@@ -130,7 +130,7 @@ class GroupOCRTests(unittest.TestCase):
         result = self.done(claim, self.screen(history))
         self.assertIn("第 9 局", result)
         self.assertIn("推薦方向：🔴 莊", result)
-        self.assertIn("建議注數：5 注（模擬）", result)
+        self.assertIn("建議注數：5 注", result)
         self.assertEqual(len(result.splitlines()), 3)
         self.assertEqual(self.state()["history"], history)
         self.assertEqual(self.state()["net_units"], 0)

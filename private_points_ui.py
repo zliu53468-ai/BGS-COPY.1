@@ -46,6 +46,22 @@ def venue_panel(venues, flow):
         for v in venues])
 
 
+def guide_panel():
+    steps = [
+        ("01  選擇平台與遊戲", "點擊開始分析，依序選擇平台與百家樂。", GOLD),
+        ("02  輸入閒莊點數", "先閒後莊，每邊0～9點。例如84＝閒8、莊4。", "#7AE4AD"),
+        ("03  查看下一局分析", "查看莊閒和機率與建議注數；輸入新一局結果即可更新。", "#85C9F4"),
+    ]
+    return _card("使用指南", "BACCARAT ANALYSIS", [
+        _box([_text(title, color=color, bold=True), _text(detail, color=MINT, margin="sm")],
+             backgroundColor=PANEL, borderColor=BORDER, borderWidth="1px",
+             cornerRadius="10px", paddingAll="14px") for title, detail, color in steps
+    ] + [_text("同一靴請依序輸入；換靴再開始新分析。看一局時先不配置注數。",
+               color=MINT, size="xs"),
+         _text("機率與注數為模型估計，非獲利保證。", color=GOLD, size="xs")],
+        [_button("開始分析", "points_menu")])
+
+
 def game_panel(venue_name, venue, flow):
     return _card("請選擇遊戲廳", venue_name, [
         _box([_text("百家樂", size="lg", bold=True, align="center"),
@@ -84,12 +100,15 @@ def _probability_row(label, probability, color):
 
 def result_panel(report, direction, units, next_hand, run):
     prob = report.get("probabilities") or {}
-    if (direction not in ("B", "P") or
+    if (direction not in ("B", "P", "SKIP") or
+        (units != 0 if direction == "SKIP" else units not in (5, 10)) or
         not all(type(prob.get(s)) in (int, float) and math.isfinite(prob[s])
                 and 0 <= prob[s] <= 1 for s in ("B", "P", "T")) or
         abs(sum(prob[s] for s in ("B", "P", "T")) - 1) > 1e-6):
         raise ValueError("模型機率資料無效，未產生結果面板")
-    side = {"B": "莊", "P": "閒"}[direction]
+    side = {"B": "莊", "P": "閒", "SKIP": "看一局"}[direction]
+    side_color = {"B": GOLD, "P": "#7AE4AD", "SKIP": "#85C9F4"}[direction]
+    detail = "輸入下一局點數後再分析" if direction == "SKIP" else f"模型估計機率：{prob[direction] * 100:.1f}%"
     return _card("分析結果", "BACCARAT ANALYSIS", [
         _box([_text("下一局預測", color=GOLD, bold=True),
               _text(f"第 {next_hand} 局", color=GOLD, size="xxl", bold=True, margin="sm"),
@@ -101,17 +120,17 @@ def result_panel(report, direction, units, next_hand, run):
         _probability_row("和", prob["T"], "#BCCEC7"),
         {"type": "separator", "color": BORDER},
         _box([_text("✧ 預測方向", color=GOLD, bold=True, align="center"),
-              _text(side, size="xxl", bold=True, align="center", margin="md"),
-              _text(f"模型估計機率：{prob[direction] * 100:.1f}%", color=MINT,
+              _text(side, color=side_color, size="xxl", bold=True, align="center", margin="md"),
+              _text(detail, color=MINT,
                     align="center", margin="sm"),
-              _text(f"模擬注數：{units} 注", color=GOLD, bold=True, align="center", margin="sm")],
+              _text(f"建議注數：{units} 注", color=GOLD, bold=True, align="center", margin="sm")],
              backgroundColor="#194532", borderColor=BORDER, borderWidth="1px",
              cornerRadius="8px", paddingAll="18px"),
-        _text("機率為模型估計，非保證命中率。", color=MINT, size="xxs", align="center"),
+        _text("機率與注數為模型估計，非獲利保證。", color=MINT, size="xxs", align="center"),
     ], [{"type": "box", "layout": "horizontal", "spacing": "sm", "contents": [
-        _button("繼續分析", "points_continue", run=run),
+        _button("開始分析", "points_menu"),
         _button("結束分析", "points_end", color=RED, run=run),
-    ]}], alt=f"第 {next_hand} 局｜預測方向：{side}｜模擬注數：{units} 注")
+    ]}], alt=f"第 {next_hand} 局｜預測方向：{side}｜建議注數：{units} 注")
 
 
 def ended_panel():

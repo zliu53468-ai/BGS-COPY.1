@@ -29,6 +29,7 @@ from bbb_soft_shoe_runtime import (
     SOURCE_COMMIT as SOFT_SHOE_SOURCE_COMMIT,
     SOURCE_BLOBS as SOFT_SHOE_SOURCE_BLOBS,
     VERSION as SOFT_SHOE_VERSION,
+    MODEL_PARAMETERS as SOFT_SHOE_MODEL_PARAMETERS,
 )
 
 
@@ -299,6 +300,7 @@ def prediction_version() -> dict[str, Any]:
         "source_commit": SOFT_SHOE_SOURCE_COMMIT,
         "repository_commit": os.getenv("RENDER_GIT_COMMIT", "").strip() or None,
         "source_blobs": SOFT_SHOE_SOURCE_BLOBS,
+        "model_parameters": dict(SOFT_SHOE_MODEL_PARAMETERS),
         "input_mode": "ocr_image_plus_manual_BPT",
         "independent_final_score": False,
         "verified_edge": False,

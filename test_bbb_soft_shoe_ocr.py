@@ -1,4 +1,4 @@
-"""BBB exact web Soft Shoe V5.1 / BGS OCR integration regression contract."""
+"""Locked Soft Shoe V5.1 with COPY sampling profile / OCR integration contract."""
 from __future__ import annotations
 import ast
 import hashlib
@@ -32,7 +32,8 @@ class SoftShoeOCRTests(unittest.TestCase):
         env = {"Any": Any, "os": os, "_verify_soft_shoe_source": verify,
                "SOFT_SHOE_VERSION": soft.VERSION,
                "SOFT_SHOE_SOURCE_COMMIT": soft.SOURCE_COMMIT,
-               "SOFT_SHOE_SOURCE_BLOBS": soft.SOURCE_BLOBS}
+               "SOFT_SHOE_SOURCE_BLOBS": soft.SOURCE_BLOBS,
+               "SOFT_SHOE_MODEL_PARAMETERS": soft.MODEL_PARAMETERS}
         exec(compile(ast.Module(body=[endpoint], type_ignores=[]),
                      "version_endpoint", "exec"), env)
         with patch.dict(os.environ, {"RENDER_GIT_COMMIT": "a" * 40}, clear=True):
@@ -42,6 +43,7 @@ class SoftShoeOCRTests(unittest.TestCase):
         self.assertEqual(deployed["repository_commit"], "a" * 40)
         self.assertEqual(deployed["source_commit"], soft.SOURCE_COMMIT)
         self.assertEqual(deployed["source_blobs"], soft.SOURCE_BLOBS)
+        self.assertEqual(deployed["model_parameters"], soft.MODEL_PARAMETERS)
         self.assertFalse(deployed["verified_edge"])
         with patch.dict(os.environ, {}, clear=True):
             self.assertIsNone(env["prediction_version"]()["repository_commit"])
@@ -50,7 +52,7 @@ class SoftShoeOCRTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "source blob mismatch"):
             env["prediction_version"]()
 
-    def test_sources_and_config_match_bbb(self):
+    def test_sources_match_bbb_and_copy_sampling_profile(self):
         self.assertEqual(soft.SOURCE_COMMIT, "ce34c8be77df4fc5922a59454daf3dc22d1a1898")
         self.assertEqual(soft.VERSION, "BBB_SOFT_SHOE_BPT_EV_V5_1")
         self.assertEqual(set(soft.SOURCE_BLOBS), {
@@ -66,7 +68,7 @@ class SoftShoeOCRTests(unittest.TestCase):
             )
         report = soft.analyze_history(SAMPLES[:3])
         cfg = report["config"]
-        self.assertEqual((cfg["PARTICLE_COUNT"], cfg["LIKELIHOOD_DRAWS"], cfg["NEXT_HAND_DRAWS"]), (448, 80, 128))
+        self.assertEqual((cfg["PARTICLE_COUNT"], cfg["LIKELIHOOD_DRAWS"], cfg["NEXT_HAND_DRAWS"]), (512, 96, 192))
         self.assertEqual((cfg["MIN_DIRECTION_ROUNDS"], cfg["MIN_DIRECTION_EV_GAP"],
                           cfg["MIN_DIRECTION_GAP_SNR"]), (3, .010, 1.05))
         self.assertEqual((cfg["MIN_DIRECTION_ESS_RATIO"], cfg["MIN_DIRECTION_DIVERSITY"],
@@ -122,9 +124,9 @@ class SoftShoeOCRTests(unittest.TestCase):
         self.assertEqual(report["road_aux"]["adaptive"]["w_applied"], 0)
 
 
-    def test_three_histories_against_byte_locked_bbb_main_engine(self):
+    def test_three_histories_against_locked_engine_with_copy_profile(self):
         # The four local JS blobs are checked against BBB/main in
-        # test_sources_and_config_match_bbb; run() must remain behavior-identical.
+        # test_sources_match_bbb_and_copy_sampling_profile; run() must remain behavior-identical.
         cases = [list("BPT"), list("BPPBTBBPPT"), list("BBPPPTTBBPBPTPPBBTP")]
         script = (
             "global.self=global;"
@@ -133,7 +135,7 @@ class SoftShoeOCRTests(unittest.TestCase):
             "const frozen=require('./bbb_engine/soft_shoe_frozen_lstm_runtime.js');"
             "require('./bbb_engine/soft_shoe_frozen_model_bundle.js');"
             "const histories=JSON.parse(process.argv[1]);"
-            "process.stdout.write(JSON.stringify(histories.map(h=>core.run(h,{},"
+            "process.stdout.write(JSON.stringify(histories.map(h=>core.run(h,{PARTICLE_COUNT:512,LIKELIHOOD_DRAWS:96,NEXT_HAND_DRAWS:192},"
             "global.BBB_SOFT_SHOE_XGB_MODEL,frozen,global.BBB_SOFT_SHOE_LSTM_MODEL))));"
         )
         direct = subprocess.run(
@@ -158,12 +160,15 @@ class SoftShoeOCRTests(unittest.TestCase):
             self.assertIs(line["validated_edge"], False)
             cfg = line["config"]
             self.assertEqual((cfg["PARTICLE_COUNT"], cfg["LIKELIHOOD_DRAWS"],
-                              cfg["NEXT_HAND_DRAWS"]), (448, 80, 128))
+                              cfg["NEXT_HAND_DRAWS"]), (512, 96, 192))
             self.assertIs(cfg["RESEARCH_DIRECTION_RELAXED"], True)
             self.assertFalse(soft.predict_screen(history)["bet_allowed"])
+            displayed = soft.predict_screen(history)
+            if displayed["direction"] == "SKIP":
+                self.assertEqual(displayed["direction_text"], "看一局")
 
 
-    def test_bbb_main_road_aux_parity_and_zero_stakes(self):
+    def test_locked_road_aux_copy_profile_parity_and_zero_stakes(self):
         # Direct BBB.run on the EXACT five source blobs. All history prefixes
         # are B/P/T only; neither OCR nor older road feature input is passed.
         cases = [
@@ -181,7 +186,7 @@ class SoftShoeOCRTests(unittest.TestCase):
             "const frozen=require('./bbb_engine/soft_shoe_frozen_lstm_runtime.js');"
             "require('./bbb_engine/soft_shoe_frozen_model_bundle.js');"
             "const histories=JSON.parse(process.argv[1]);"
-            "process.stdout.write(JSON.stringify(histories.map(h=>core.run(h,{},"
+            "process.stdout.write(JSON.stringify(histories.map(h=>core.run(h,{PARTICLE_COUNT:512,LIKELIHOOD_DRAWS:96,NEXT_HAND_DRAWS:192},"
             "global.BBB_SOFT_SHOE_XGB_MODEL,frozen,global.BBB_SOFT_SHOE_LSTM_MODEL))));"
         )
         direct = subprocess.run(
@@ -199,7 +204,7 @@ class SoftShoeOCRTests(unittest.TestCase):
             cfg = line["config"]
             self.assertEqual(
                 (cfg["PARTICLE_COUNT"], cfg["LIKELIHOOD_DRAWS"],
-                 cfg["NEXT_HAND_DRAWS"]), (448, 80, 128)
+                 cfg["NEXT_HAND_DRAWS"]), (512, 96, 192)
             )
             self.assertIs(cfg["ROAD_AUX_ENABLED"], True)
             road = line["road_aux"]
@@ -316,13 +321,13 @@ class SoftShoeOCRTests(unittest.TestCase):
         result = soft.analyze_history(history)
         elapsed = time.perf_counter() - started
         self.assertEqual(result["observations"], len(history))
-        self.assertEqual(result["config"]["PARTICLE_COUNT"], 448)
-        self.assertEqual(result["config"]["LIKELIHOOD_DRAWS"], 80)
-        self.assertEqual(result["config"]["NEXT_HAND_DRAWS"], 128)
+        self.assertEqual(result["config"]["PARTICLE_COUNT"], 512)
+        self.assertEqual(result["config"]["LIKELIHOOD_DRAWS"], 96)
+        self.assertEqual(result["config"]["NEXT_HAND_DRAWS"], 192)
         self.assertLess(elapsed, soft.TIMEOUT_SECONDS)
         print(f"BGS_SYNTHETIC_70_HAND_WORKER_SECONDS={elapsed:.3f}")
 
-    def test_research_direction_exact_web_parity_and_no_cross_uid_memory(self):
+    def test_copy_profile_exact_parity_and_no_cross_uid_memory(self):
         for history in ([], ["B"], ["T"], list("BPPBT"), SAMPLES * 2):
             actual = soft.analyze_history(history)
             source = (
@@ -330,7 +335,7 @@ class SoftShoeOCRTests(unittest.TestCase):
                 "require('./bbb_engine/soft_shoe_model_bundle.js');"
                 "const frozen=require('./bbb_engine/soft_shoe_frozen_lstm_runtime.js');"
                 "require('./bbb_engine/soft_shoe_frozen_model_bundle.js');"
-                "process.stdout.write(JSON.stringify(core.run(JSON.parse(process.argv[1]),{},"
+                "process.stdout.write(JSON.stringify(core.run(JSON.parse(process.argv[1]),{PARTICLE_COUNT:512,LIKELIHOOD_DRAWS:96,NEXT_HAND_DRAWS:192},"
                 "global.BBB_SOFT_SHOE_XGB_MODEL,frozen,global.BBB_SOFT_SHOE_LSTM_MODEL)));"
             )
             direct = subprocess.run(
