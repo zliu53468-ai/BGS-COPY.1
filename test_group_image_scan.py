@@ -54,6 +54,8 @@ class GroupOCRTests(unittest.TestCase):
             "ev_banker": .307, "ev_player": -.34,
             "probabilities": {"B": .66, "P": .32, "T": .02},
             "research_view": {
+                "abs_ev_gap": .647, "ev_gap_se": .01, "ev_gap_snr": 64.7,
+                "ess_ratio": .9, "ancestor_diversity": 1,
                 "eligible": True, "direction": "B", "road_confirmed": True},
             "road_aux": {
                 "estimated_only": True, "validated_betting_edge": False},
@@ -103,6 +105,22 @@ class GroupOCRTests(unittest.TestCase):
         self.env["GROUP_IMAGE_SCAN_ENABLED"] = "0"
         self.assertIsNone(self.claim(self.image()))
         self.assertEqual(self.state()["history"], [])
+
+    def test_real_engine_observation_matches_text_and_clears_previous_image_tier(self):
+        from bbb_soft_shoe_runtime import analyze_history
+        from group_text_research import _research
+        self.start()
+        for raw, wanted_tier in (("BBB", 5), ("BBBBBBBB", 0)):
+            history = list(raw)
+            reply = finish_image(self.claim(self.image()), self.screen(history),
+                                 environ=self.env, state_path=self.path,
+                                 predictor=analyze_history)
+            direction, tier, text = _research(history, analyze_history)
+            self.assertEqual(reply, text)
+            self.assertEqual(tier, wanted_tier)
+            self.assertEqual(self.state()["last_research_direction"], direction)
+            self.assertEqual(self.state()["pending_tier"], tier)
+            self.assertEqual(self.state()["history"], history)
 
     def test_first_scan_and_incremental_scan_not_duplicated(self):
         self.start()

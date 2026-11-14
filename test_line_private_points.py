@@ -114,7 +114,9 @@ class PrivatePointsTests(unittest.TestCase):
                 "bankroll_fraction": 0, "observations": len(history), "candidate": "B",
                 "probabilities": {"B": .51, "P": .48, "T": .01},
                 "ev_banker": .0045, "ev_player": -.03,
-                "research_view": {"direction": "SKIP", "eligible": False},
+                "research_view": {"direction": "SKIP", "eligible": False,
+                                  "abs_ev_gap": .0345, "ev_gap_se": .01, "ev_gap_snr": 3.45,
+                                  "ess_ratio": .9, "ancestor_diversity": 1},
                 "road_aux": {"validated_betting_edge": False}}
 
     def test_start_requires_venue_then_selection_accepts_points_without_bankroll(self):
@@ -131,7 +133,8 @@ class PrivatePointsTests(unittest.TestCase):
         text = self.messages[-1][1][0]["text"]
         self.assertEqual(len(text.splitlines()), 3)
         self.assertIn("第 2 局", text)
-        self.assertIn("5 注", text)
+        self.assertIn("觀望", text)
+        self.assertIn("0 注", text)
         self.assertFalse(self.forwarded)
 
     def test_real_engine_and_three_line_result_match_group_for_entire_shoe_prefix(self):
@@ -155,7 +158,8 @@ class PrivatePointsTests(unittest.TestCase):
         self.assertEqual(self.session("U-one")["raw_outcomes"], ["P", "B"])
         self.assertEqual(self.session("U-two")["raw_outcomes"], ["B"])
         path = audit.database_path(self.path)
-        self.assertEqual(audit.summarize(path, audit.scope_key("user", "U-one"))["cohorts"][0]["wins"], 1)
+        first = audit.summarize(path, audit.scope_key("user", "U-one"))["cohorts"][0]
+        self.assertEqual((first["wins"], first["skips"]), (0, 1))
         self.assertEqual(audit.summarize(path, audit.scope_key("user", "U-two"))["cohorts"][0]["resolved"], 0)
         self.assertEqual(audit.summarize(path, audit.scope_key("group", "U-one"))["cohorts"], [])
         self.assertFalse(self.path.with_name("group_research_state.json").exists())
@@ -167,6 +171,36 @@ class PrivatePointsTests(unittest.TestCase):
             model.assert_called_once_with(["P", "B", "T"])
         stats = audit.summarize(audit.database_path(self.path), audit.scope_key("user", "U-one"))
         self.assertEqual((stats["observations"], stats["cohorts"][0]["forecasts"], stats["cohorts"][0]["resolved"]), (3, 1, 0))
+
+    def test_new_gate_preserves_active_session_and_separates_policy_results(self):
+        self.start()
+        run_id = self.session()["analysis_run_id"]
+        with patch.object(group, "analyze_history", side_effect=self.fake_model), \
+                patch.object(private, "AUDIT_POLICY", private.POLICY):
+            self.call("84\n38\n99")
+        self.assertEqual(self.session()["screen_last_prediction"]["simulation_tier"], 5)
+
+        def weak(history):
+            result = self.fake_model(history)
+            result["research_view"]["ess_ratio"] = .39
+            return result
+
+        with patch.object(group, "analyze_history", side_effect=weak):
+            reply = self.call("38")[0]["text"]
+        current = self.session()
+        self.assertEqual(current["analysis_run_id"], run_id)
+        self.assertEqual(current["raw_outcomes"], list("PBTB"))
+        self.assertEqual(current["private_points_policy"], private.POLICY)
+        self.assertIn("推薦方向：⚪ 觀望", reply)
+        self.assertEqual(current["screen_last_prediction"]["simulation_tier"], 0)
+        self.assertEqual(current["screen_last_prediction"]["bbb_soft_shoe"]["report"], weak(list("PBTB")))
+        with patch.object(group, "analyze_history", side_effect=self.fake_model):
+            self.assertIn("建議注數：5 注", self.call("38")[0]["text"])
+        cohorts = audit.summarize(audit.database_path(self.path), audit.scope_key("user", "U-one"))["cohorts"]
+        self.assertEqual(len(cohorts), 2)
+        self.assertEqual({c["policy"] for c in cohorts}, {private.POLICY, private.AUDIT_POLICY})
+        current = next(c for c in cohorts if c["policy"] == private.AUDIT_POLICY)
+        self.assertEqual((current["wins"], current["skips"]), (0, 1))
 
     def test_nonconsecutive_redelivery_and_old_start_never_duplicate_or_reset(self):
         store.select_venue("U-one", "DG")

@@ -15,6 +15,8 @@ import group_text_research as group
 import prediction_audit as audit
 
 POLICY = "PRIVATE_POINTS_GROUP_COMPATIBLE_V1"
+# Keep active session compatibility; separate results when display policy changes.
+AUDIT_POLICY = POLICY + "__" + group.GROUP_GATE_POLICY
 START = {"開始分析", "開始點數分析", "點數模式"}
 END = {"結束", "結束分析"}
 STATUS = {"查詢狀態", "目前狀態"}
@@ -157,7 +159,7 @@ def _evaluate(legacy, uid, event_id, pairs, outcome):
             storage._save_all_unlocked(data)
             audit.safe_record(path=audit.database_path(storage.SESSION_DATA_FILE),
                 scope=audit.scope_key("user", uid), shoe=run_id, event_key="private:" + event_id,
-                history=history, report=report, direction=direction, policy=POLICY,
+                history=history, report=report, direction=direction, policy=AUDIT_POLICY,
                 source=session["screen_last_input_source"], source_commit=group.SOURCE_COMMIT,
                 scores=scores, units=tier)
         return [message(text)]
