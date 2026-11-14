@@ -25,6 +25,24 @@ import store
 from line_group_webhook import install_group_webhook
 
 
+def walk(value):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from walk(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from walk(child)
+
+
+def panel_text(value):
+    return "\n".join(n["text"] for n in walk(value) if n.get("type") == "text")
+
+
+def button_data(value, label):
+    return next(n["data"] for n in walk(value) if n.get("type") == "postback" and n.get("label") == label)
+
+
 class PrivatePointsTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -102,9 +120,14 @@ class PrivatePointsTests(unittest.TestCase):
     def call(self, text="", **kwargs):
         return private.handle_event(self.legacy, self.event(text, **kwargs))
 
+    def finish_selection(self, uid="U-one"):
+        flow = self.session(uid)["private_points_flow"]
+        game = self.call(action=f"action=points_venue&venue=DG&flow={flow}", uid=uid)
+        return self.call(action=button_data(game[0], "百家樂"), uid=uid)
+
     def start(self, uid="U-one"):
-        store.select_venue(uid, "DG")
-        return self.call("開始分析", uid=uid)
+        self.call("開始分析", uid=uid)
+        return self.finish_selection(uid)
 
     def session(self, uid="U-one"):
         return store.get_session(uid)
@@ -119,9 +142,18 @@ class PrivatePointsTests(unittest.TestCase):
                                   "ess_ratio": .9, "ancestor_diversity": 1},
                 "road_aux": {"validated_betting_edge": False}}
 
-    def test_start_requires_venue_then_selection_accepts_points_without_bankroll(self):
-        self.assertIn("請選館", self.call("開始分析")[0]["text"])
-        self.post([self.event(action="action=venue&venue=DG&room=1")])
+    def test_start_venue_game_input_and_result_follow_actual_buttons(self):
+        menu = self.call("開始分析")[0]
+        self.assertEqual(menu["type"], "flex")
+        self.assertIn("請選擇遊戲平台", panel_text(menu))
+        self.post([self.event(action=button_data(menu, "DG真人"))])
+        game = self.messages[-1][1][0]
+        self.assertIn("請選擇遊戲廳", panel_text(game))
+        self.assertFalse(self.session()["point_score_mode"])
+        self.post([self.event(action=button_data(game, "百家樂"))])
+        prompt = self.messages[-1][1][0]
+        self.assertIn("請輸入閒莊點數", panel_text(prompt))
+        self.assertIn("例如：84", panel_text(prompt))
         state = self.session()
         self.assertTrue(state["point_score_mode"])
         self.assertFalse(state["awaiting_bankroll"])
@@ -130,23 +162,85 @@ class PrivatePointsTests(unittest.TestCase):
         with patch.object(group, "analyze_history", side_effect=self.fake_model):
             self.post([self.event("84")])
         self.assertEqual(self.session()["raw_outcomes"], ["P"])
-        text = self.messages[-1][1][0]["text"]
-        self.assertEqual(len(text.splitlines()), 3)
+        card = self.messages[-1][1][0]
+        self.assertEqual(card["type"], "flex")
+        text = panel_text(card)
         self.assertIn("第 2 局", text)
-        self.assertIn("觀望", text)
-        self.assertIn("0 注", text)
+        self.assertNotIn("觀望", text)
+        self.assertIn("模擬注數：5 注", text)
+        self.assertNotIn("桌號", text)
+        self.assertIn("51.0%", text)
         self.assertFalse(self.forwarded)
 
-    def test_real_engine_and_three_line_result_match_group_for_entire_shoe_prefix(self):
+    def test_real_engine_flex_matches_group_forecast_for_entire_shoe_prefix(self):
         self.start()
         for pair, expected in (("84", "P"), ("莊7閒2", "PB"), ("９９", "PBT")):
-            actual = self.call(pair)[0]["text"]
+            actual = self.call(pair)[0]
             direction, tier, wanted = group._research(list(expected), group.analyze_history)
-            self.assertEqual(actual, wanted)
+            self.assertEqual(actual["type"], "flex")
+            self.assertEqual(self.session()["private_points_text"], wanted)
+            self.assertNotIn("觀望", panel_text(actual))
+            self.assertIn(f"模擬注數：{tier} 注", panel_text(actual))
             pred = self.session()["screen_last_prediction"]
             self.assertEqual(pred["bbb_soft_shoe"]["report"], group.analyze_history(list(expected)))
             self.assertEqual((pred["direction"], pred["simulation_tier"]), (direction, tier))
             self.assertEqual((pred["formal_action"], pred["bet_amount"]), ("Skip", 0))
+
+    def test_continue_preserves_history_end_clears_and_stale_result_cannot_end_new_run(self):
+        self.start()
+        with patch.object(group, "analyze_history", side_effect=self.fake_model) as model:
+            card = self.call("84")[0]
+            before = self.session()
+            prompt = self.call(action=button_data(card, "繼續分析"))[0]
+            self.assertIn("請輸入閒莊點數", panel_text(prompt))
+            self.assertEqual(self.session()["raw_outcomes"], before["raw_outcomes"])
+            self.assertEqual(self.session()["analysis_run_id"], before["analysis_run_id"])
+            model.assert_called_once()
+        ended = self.call(action=button_data(card, "結束分析"))[0]
+        self.assertIn("本次分析已結束", panel_text(ended))
+        self.assertEqual(self.session()["raw_outcomes"], [])
+        self.assertFalse(self.session()["analysis_active"])
+        self.start()
+        new_run = self.session()["analysis_run_id"]
+        self.assertIn("已失效", panel_text(self.call(action=button_data(card, "結束分析"))[0]))
+        self.assertTrue(self.session()["analysis_active"])
+        self.assertEqual(self.session()["analysis_run_id"], new_run)
+
+    def test_stale_or_foreign_menu_does_not_mutate_new_selection(self):
+        old = self.call("開始分析")[0]
+        new = self.call("開始分析")[0]
+        before = self.session()
+        self.assertIn("已失效", panel_text(self.call(action=button_data(old, "DG真人"))[0]))
+        self.assertEqual(self.session()["private_points_flow"], before["private_points_flow"])
+        self.start("U-two")
+        other = self.session("U-two")["analysis_run_id"]
+        self.assertIn("已失效", panel_text(self.call(action=button_data(new, "DG真人"), uid="U-two")[0]))
+        self.assertEqual(self.session("U-two")["analysis_run_id"], other)
+
+    def test_score_before_game_selection_is_not_reinterpreted_as_bankroll(self):
+        menu = self.call("開始分析")[0]
+        with patch.object(group, "analyze_history") as model:
+            self.assertIn("先完成", self.call("84")[0]["text"])
+            game = self.call(action=button_data(menu, "DG真人"))[0]
+            self.assertIn("先完成", self.call("84")[0]["text"])
+            model.assert_not_called()
+        self.assertEqual(self.session()["bankroll"], 0)
+        self.assertEqual(self.session()["raw_outcomes"], [])
+        self.call(action=button_data(game, "百家樂"))
+        self.assertTrue(self.session()["point_score_mode"])
+
+    def test_replayed_game_button_cannot_reset_received_scores(self):
+        menu = self.call("開始分析")[0]
+        game = self.call(action=button_data(menu, "DG真人"))[0]
+        data = button_data(game, "百家樂")
+        self.call(action=data, event_id="game")
+        with patch.object(group, "analyze_history", side_effect=self.fake_model):
+            self.call("84")
+        run = self.session()["analysis_run_id"]
+        self.assertEqual(self.call(action=data, event_id="game"), [])
+        self.assertIn("已失效", panel_text(self.call(action=data)[0]))
+        self.assertEqual(self.session()["raw_outcomes"], ["P"])
+        self.assertEqual(self.session()["analysis_run_id"], run)
 
     def test_two_users_and_group_namespaces_stay_separate(self):
         self.start("U-one")
@@ -159,7 +253,7 @@ class PrivatePointsTests(unittest.TestCase):
         self.assertEqual(self.session("U-two")["raw_outcomes"], ["B"])
         path = audit.database_path(self.path)
         first = audit.summarize(path, audit.scope_key("user", "U-one"))["cohorts"][0]
-        self.assertEqual((first["wins"], first["skips"]), (0, 1))
+        self.assertEqual((first["wins"], first["skips"]), (1, 0))
         self.assertEqual(audit.summarize(path, audit.scope_key("user", "U-two"))["cohorts"][0]["resolved"], 0)
         self.assertEqual(audit.summarize(path, audit.scope_key("group", "U-one"))["cohorts"], [])
         self.assertFalse(self.path.with_name("group_research_state.json").exists())
@@ -172,7 +266,7 @@ class PrivatePointsTests(unittest.TestCase):
         stats = audit.summarize(audit.database_path(self.path), audit.scope_key("user", "U-one"))
         self.assertEqual((stats["observations"], stats["cohorts"][0]["forecasts"], stats["cohorts"][0]["resolved"]), (3, 1, 0))
 
-    def test_new_gate_preserves_active_session_and_separates_policy_results(self):
+    def test_always_candidate_preserves_active_session_and_separates_policy_results(self):
         self.start()
         run_id = self.session()["analysis_run_id"]
         with patch.object(group, "analyze_history", side_effect=self.fake_model), \
@@ -186,25 +280,26 @@ class PrivatePointsTests(unittest.TestCase):
             return result
 
         with patch.object(group, "analyze_history", side_effect=weak):
-            reply = self.call("38")[0]["text"]
+            reply = panel_text(self.call("38")[0])
         current = self.session()
         self.assertEqual(current["analysis_run_id"], run_id)
         self.assertEqual(current["raw_outcomes"], list("PBTB"))
         self.assertEqual(current["private_points_policy"], private.POLICY)
-        self.assertIn("推薦方向：⚪ 觀望", reply)
-        self.assertEqual(current["screen_last_prediction"]["simulation_tier"], 0)
+        self.assertNotIn("觀望", reply)
+        self.assertEqual(current["screen_last_prediction"]["simulation_tier"], 5)
         self.assertEqual(current["screen_last_prediction"]["bbb_soft_shoe"]["report"], weak(list("PBTB")))
         with patch.object(group, "analyze_history", side_effect=self.fake_model):
-            self.assertIn("建議注數：5 注", self.call("38")[0]["text"])
+            self.assertIn("模擬注數：5 注", panel_text(self.call("38")[0]))
         cohorts = audit.summarize(audit.database_path(self.path), audit.scope_key("user", "U-one"))["cohorts"]
         self.assertEqual(len(cohorts), 2)
         self.assertEqual({c["policy"] for c in cohorts}, {private.POLICY, private.AUDIT_POLICY})
         current = next(c for c in cohorts if c["policy"] == private.AUDIT_POLICY)
-        self.assertEqual((current["wins"], current["skips"]), (0, 1))
+        self.assertEqual((current["wins"], current["skips"]), (1, 0))
 
     def test_nonconsecutive_redelivery_and_old_start_never_duplicate_or_reset(self):
         store.select_venue("U-one", "DG")
         self.call("開始分析", event_id="start")
+        self.finish_selection()
         with patch.object(group, "analyze_history", side_effect=self.fake_model) as model:
             self.call("84", event_id="a")
             self.call("38", event_id="b")
@@ -241,7 +336,7 @@ class PrivatePointsTests(unittest.TestCase):
     def test_membership_and_bankroll_are_preserved_and_expiry_blocks_model(self):
         store.select_venue("U-one", "DG")
         store.upsert_session("U-one", {"permanent_access": True, "bankroll": 30000, "awaiting_bankroll": True})
-        self.call("開始分析")
+        self.start()
         with patch.object(group, "analyze_history", side_effect=self.fake_model):
             self.call("84")
         self.assertEqual(self.session()["bankroll"], 30000)
@@ -279,7 +374,8 @@ class PrivatePointsTests(unittest.TestCase):
         store.upsert_session("U-one", {"permanent_access": False, "trial_started_at": 1, "access_until": 2})
         self.post([self.event("84"), self.event("開始分析")])
         self.assertTrue(self.session()["permanent_access"])
-        self.assertTrue(self.session()["point_score_mode"])
+        self.assertEqual(self.session()["private_points_stage"], "venue")
+        self.assertFalse(self.session()["point_score_mode"])
         self.assertEqual(self.session()["raw_outcomes"], [])
         self.assertEqual(len(self.forwarded), 1)
 
@@ -293,7 +389,7 @@ class PrivatePointsTests(unittest.TestCase):
             model.assert_called_once()
         self.assertEqual(len(self.pushes), 1)
         self.assertEqual(self.pushes[0][0], "U-one")
-        self.assertIn("第 2 局", self.pushes[0][1][0]["text"])
+        self.assertIn("第 2 局", panel_text(self.pushes[0][1][0]))
 
 
 if __name__ == "__main__":

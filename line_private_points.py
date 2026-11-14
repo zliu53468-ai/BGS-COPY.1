@@ -13,15 +13,18 @@ from urllib.parse import parse_qs
 
 import group_text_research as group
 import prediction_audit as audit
+import private_points_ui as ui
 
 POLICY = "PRIVATE_POINTS_GROUP_COMPATIBLE_V1"
 # Keep active session compatibility; separate results when display policy changes.
 AUDIT_POLICY = POLICY + "__" + group.GROUP_GATE_POLICY
-START = {"開始分析", "開始點數分析", "點數模式"}
+START = {"開始分析", "開始點數分析", "點數模式", "開始牌局分析"}
 END = {"結束", "結束分析"}
 STATUS = {"查詢狀態", "目前狀態"}
 RESET = {"🔄 清除重來", "清除路紙", "清除畫面", "重來"}
 START_ACTIONS = {"start_screen", "restart_screen", "screen_clear", "reset", "road_clear"}
+MENU_ACTIONS = {"points_menu", "start_guide", "venues"}
+POINT_ACTIONS = {"points_venue", "points_game", "points_continue", "points_end"}
 
 
 def _text(event):
@@ -37,7 +40,7 @@ def supports(legacy, event) -> bool:
     if not hasattr(legacy, "store") or (event.get("source") or {}).get("type") != "user":
         return False
     if event.get("type") == "postback":
-        return _action(event).get("action") in START_ACTIONS | {"venue", "end"}
+        return _action(event).get("action") in START_ACTIONS | MENU_ACTIONS | POINT_ACTIONS | {"venue", "end"}
     if event.get("type") != "message" or (event.get("message") or {}).get("type") != "text":
         return False
     raw = _text(event)
@@ -51,9 +54,11 @@ def message(text):
     buttons = [("▶ 開始分析", "開始分析"), ("✍ 點數格式", "點數格式"),
                ("📊 查詢狀態", "查詢狀態"), ("📈 查詢成績", "查詢成績"),
                ("📷 圖片模式", "圖片模式"), ("⏹ 結束分析", "結束分析")]
-    return {"type": "text", "text": text[:5000], "quickReply": {"items": [
+    result = dict(text) if isinstance(text, dict) else {"type": "text", "text": text[:5000]}
+    result["quickReply"] = {"items": [
         {"type": "action", "action": {"type": "message", "label": label, "text": command}}
-        for label, command in buttons]}}
+        for label, command in buttons]}
+    return result
 
 
 def _owned(session):
@@ -69,6 +74,80 @@ def _remember(session, event_id):
         list(session.get("private_points_processed") or []) + [event_id])[-group.MAX_EVENTS:]
 
 
+def _venues(legacy):
+    return [{"code": code, "name": entry.get("name") or code + "真人"}
+            for code, entry in legacy.VENUE_BY_CODE.items()]
+
+
+def _fresh_points(storage, current, *, active, stage):
+    session = copy.deepcopy(current)
+    storage._clear_screen_fields(session)
+    session.update({"analysis_mode": "screen", "analysis_active": active,
+                    "analysis_run_id": uuid.uuid4().hex[:16],
+                    "analysis_started_at": storage._now() if active else 0, "analysis_ended_at": 0,
+                    "point_score_mode": active, "point_score_audit": [], "point_score_audit_total": 0,
+                    "last_point_score": {}, "last_point_message_id": "",
+                    "awaiting_bankroll": False, "awaiting_screenshot": False,
+                    "status": "等待輸入閒莊點數" if active else "等待選擇遊戲",
+                    "private_points_policy": POLICY, "private_points_scores": [],
+                    "private_points_text": "", "private_points_stage": stage,
+                    "private_points_flow": current.get("private_points_flow") or uuid.uuid4().hex,
+                    "private_points_processed": list(current.get("private_points_processed") or [])})
+    return session
+
+
+def _open_menu(legacy, uid, event_id):
+    legacy._ensure_access(uid)
+    storage = legacy.store
+    with storage._LOCK:
+        current = storage.get_session(uid)
+        if event_id in (current.get("private_points_processed") or []):
+            return []
+        session = _fresh_points(storage, current, active=False, stage="venue")
+        session["private_points_flow"] = uuid.uuid4().hex
+        _remember(session, event_id)
+        storage.upsert_session(uid, session)
+    return [message(ui.venue_panel(_venues(legacy), session["private_points_flow"]))]
+
+
+def _choose_venue(legacy, uid, event_id, query):
+    legacy._ensure_access(uid)
+    venue = str(query.get("venue") or "").upper()
+    if venue not in legacy.VENUE_BY_CODE:
+        raise ValueError("無效館別")
+    storage = legacy.store
+    with storage._LOCK:
+        current = storage.get_session(uid)
+        if event_id in (current.get("private_points_processed") or []):
+            return []
+        if query.get("action") == "points_venue" and (
+            query.get("flow") != current.get("private_points_flow") or
+            current.get("private_points_stage") != "venue"):
+            return [message("此選單已失效，請使用最新選單或輸入「開始分析」。")]
+        selected = storage.select_venue(uid, venue, "1")
+        session = _fresh_points(storage, selected, active=False, stage="game")
+        # A legacy venue button starts a new navigation flow too.
+        if query.get("action") == "venue":
+            session["private_points_flow"] = uuid.uuid4().hex
+        _remember(session, event_id)
+        storage.upsert_session(uid, session)
+    name = legacy.VENUE_BY_CODE[venue].get("name") or venue + "真人"
+    return [message(ui.game_panel(name, venue, session["private_points_flow"]))]
+
+
+def _choose_game(legacy, uid, event_id, query):
+    legacy._ensure_access(uid)
+    with legacy.store._LOCK:
+        current = legacy.store.get_session(uid)
+        if event_id in (current.get("private_points_processed") or []):
+            return []
+        if (query.get("game") != "baccarat" or query.get("venue") != current.get("venue") or
+            query.get("flow") != current.get("private_points_flow") or
+            current.get("private_points_stage") != "game"):
+            return [message("此遊戲選單已失效，請使用最新選單或輸入「開始分析」。")]
+        return _begin(legacy, uid, event_id, query)
+
+
 def _begin(legacy, uid, event_id, query):
     storage = legacy.store
     legacy._ensure_access(uid)
@@ -76,29 +155,12 @@ def _begin(legacy, uid, event_id, query):
         current = storage.get_session(uid)
         if event_id in (current.get("private_points_processed") or []):
             return []
-        if query.get("action") == "venue":
-            venue = str(query.get("venue") or "").upper()
-            if venue not in legacy.VENUE_BY_CODE:
-                raise ValueError("無效館別")
-            current = storage.select_venue(uid, venue, str(query.get("room") or "1"))
         if not current.get("venue"):
-            return [legacy.venue_panel(uid)]
-        session = copy.deepcopy(current)
-        storage._clear_screen_fields(session)
-        session.update({"analysis_mode": "screen", "analysis_active": True,
-                        "analysis_run_id": uuid.uuid4().hex[:16],
-                        "analysis_started_at": storage._now(), "analysis_ended_at": 0,
-                        "point_score_mode": True, "point_score_audit": [], "point_score_audit_total": 0,
-                        "last_point_score": {}, "last_point_message_id": "",
-                        "awaiting_bankroll": False, "awaiting_screenshot": False,
-                        "status": "等待輸入閒莊點數",
-                        "private_points_policy": POLICY, "private_points_scores": [],
-                        "private_points_text": "", "private_points_processed":
-                        list(current.get("private_points_processed") or [])})
+            return _open_menu(legacy, uid, event_id)
+        session = _fresh_points(storage, current, active=True, stage="input")
         _remember(session, event_id)
         storage.upsert_session(uid, session)
-    return [message("✅ 已開始私人點數分析｜目前 0 局\n" + group.SCORE_HELP +
-                    "\n每局輸入一次，直接回覆下一局方向與模擬注數。")]
+    return [message(ui.input_panel(session["analysis_run_id"]))]
 
 
 def _evaluate(legacy, uid, event_id, pairs, outcome):
@@ -125,6 +187,7 @@ def _evaluate(legacy, uid, event_id, pairs, outcome):
         try:
             report = {}
             direction, tier, text = group._research(history, group.analyze_history, capture=report)
+            panel = ui.result_panel(report, direction, tier, len(history) + 1, run_id)
         finally:
             legacy._PREDICTION_SLOTS.release()
         # A restart, end, mode switch or other accepted input invalidates work
@@ -162,7 +225,7 @@ def _evaluate(legacy, uid, event_id, pairs, outcome):
                 history=history, report=report, direction=direction, policy=AUDIT_POLICY,
                 source=session["screen_last_input_source"], source_commit=group.SOURCE_COMMIT,
                 scores=scores, units=tier)
-        return [message(text)]
+        return [message(panel)]
     finally:
         operation_lock.release()
 
@@ -186,8 +249,12 @@ def handle_event(legacy, event):
         action = query.get("action")
         if action in START_ACTIONS - {"start_screen"} and not _active(legacy.store.get_session(uid)):
             return None
-        if raw in START or action in START_ACTIONS | {"venue"}:
-            return _begin(legacy, uid, event_id, query)
+        if raw in START or action in START_ACTIONS | MENU_ACTIONS:
+            return _open_menu(legacy, uid, event_id)
+        if action in {"venue", "points_venue"}:
+            return _choose_venue(legacy, uid, event_id, query)
+        if action == "points_game":
+            return _choose_game(legacy, uid, event_id, query)
         current = legacy.store.get_session(uid)
         if event_id in (current.get("private_points_processed") or []):
             return []
@@ -199,15 +266,23 @@ def handle_event(legacy, event):
             return None
         if current.get("analysis_active") and not current.get("point_score_mode"):
             return None  # Original screenshot mode still owns its controls.
-        if raw in END or action == "end":
+        if action in {"points_continue", "points_end"}:
+            legacy._ensure_access(uid)
+            if not _active(current) or query.get("run") != current.get("analysis_run_id"):
+                return [message("此結果面板已失效，請使用最新面板或輸入「開始分析」。")]
+        if raw in END or action in {"end", "points_end"}:
             with legacy.store._LOCK:
+                latest = legacy.store.get_session(uid)
+                if action == "points_end" and (
+                    not _active(latest) or query.get("run") != latest.get("analysis_run_id")):
+                    return [message("此結果面板已失效，請使用最新面板。")]
                 ended = legacy._end_uid_analysis(uid)
                 ended.update({"point_score_mode": False, "point_score_audit": [],
                               "point_score_audit_total": 0, "private_points_scores": [],
-                              "private_points_text": ""})
+                              "private_points_text": "", "private_points_stage": "ended"})
                 _remember(ended, event_id)
                 legacy.store.upsert_session(uid, ended)
-            return [message("⏹ 私人分析已結束，本場點數與牌路已清空。\n輸入「開始分析」即可重新開始。")]
+            return [message(ui.ended_panel())]
         if raw in STATUS:
             status = "分析中" if _active(current) else "已結束或已切換模式"
             return [message(f"📊 私人點數分析：{status}\n已輸入 {len(current.get('raw_outcomes') or [])} 局\n"
@@ -215,9 +290,12 @@ def handle_event(legacy, event):
         if raw in RESET and _active(current):
             return _begin(legacy, uid, event_id, query)
         if not _active(current):
+            if current.get("private_points_stage") in {"venue", "game"}:
+                return [message("請先完成平台與百家樂選擇，再輸入閒莊點數。")]
             return None
-        if raw == "繼續分析":
-            return [message(group.SCORE_HELP)]
+        if raw == "繼續分析" or action == "points_continue":
+            legacy._ensure_access(uid)
+            return [message(ui.input_panel(current["analysis_run_id"], len(current.get("raw_outcomes") or [])))]
         pairs = group.parse_group_scores(raw)
         outcome = group.RESULTS.get(group.RESULT_ALIASES.get(raw.upper().replace(" ", ""), raw))
         if pairs is not None or outcome is not None:

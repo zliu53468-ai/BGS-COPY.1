@@ -189,8 +189,8 @@ class WebhookRouteTests(unittest.TestCase):
             self.assertEqual(len(self.stub.pushes), 1)
             self.assertEqual(self.stub.pushes[0][0], "C-good")
             self.assertIn("第 2 局", self.stub.pushes[0][1][0]["text"])
-            self.assertIn("觀望", self.stub.pushes[0][1][0]["text"])
-            self.assertIn("0 注（模擬）", self.stub.pushes[0][1][0]["text"])
+            self.assertNotIn("觀望", self.stub.pushes[0][1][0]["text"])
+            self.assertIn("5 注（模擬，固定最低級距）", self.stub.pushes[0][1][0]["text"])
             state = json.loads((Path(directory) / "group.json").read_text())["groups"]["C-good"]
             self.assertEqual(state["history"], ["B"])
 

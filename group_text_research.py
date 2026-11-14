@@ -1,8 +1,9 @@
 """Opt-in, UID-gated LINE group text interface for unchanged BBB Soft Shoe.
 
 This is a research-only simulation ledger. No wagers are made or authorized.
-Group and admin allowlists are BOTH mandatory. This module is never called
-for one-to-one LINE OCR/LIFF sessions and never changes the BBB engine.
+Group transport requires BOTH group and admin allowlists. The shared research
+reply also serves private points behind the original membership guard; it never
+changes the BBB engine or the separate private OCR/LIFF flow.
 """
 from __future__ import annotations
 
@@ -27,25 +28,14 @@ RESULT_ALIASES = {
     "B": "紅", "P": "藍", "T": "和",
     "🔴莊": "紅", "🔵閒": "藍", "🟢和": "和",
 }
-SIDE_LABEL = {"B": "🔴 莊", "P": "🔵 閒", "T": "🟢 和", "SKIP": "⚪ 觀望"}
+SIDE_LABEL = {"B": "🔴 莊", "P": "🔵 閒", "T": "🟢 和", "SKIP": "尚未產生"}
 ALLOWED_UNITS = (5, 10, 20)
 MAX_EVENTS = 200
-GROUP_GATE_POLICY = "COPY_BALANCED_DISPLAY_GATE_V1"
+GROUP_GATE_POLICY = "COPY_ALWAYS_CANDIDATE_V2"
 GATE_KEYS = (
     "MIN_DIRECTION_ROUNDS", "MIN_DIRECTION_EV_GAP", "MIN_DIRECTION_GAP_SNR",
     "MIN_DIRECTION_ESS_RATIO", "MIN_DIRECTION_DIVERSITY", "MAX_DIRECTION_GAP_SE",
 )
-# Display-only thresholds; never pass these into the locked prediction engine.
-# Keep the core's particle-health limits, but ease its 0.010 EV-gap / 1.05 SNR
-# display thresholds. This filters ambiguous estimates, not proven losing bets.
-DISPLAY_GATE_THRESHOLDS = {
-    "MIN_DIRECTION_ROUNDS": 3,
-    "MIN_DIRECTION_EV_GAP": .006,
-    "MIN_DIRECTION_GAP_SNR": 1.0,
-    "MIN_DIRECTION_ESS_RATIO": .40,
-    "MIN_DIRECTION_DIVERSITY": .25,
-    "MAX_DIRECTION_GAP_SE": .070,
-}
 SCORE_HELP = (
     "✍️ 請輸入閒、莊各自最後總點數（0～9）。\n"
     "例如：閒8莊4、8,4 或 84，均為閒8點／莊4點。\n"
@@ -144,7 +134,7 @@ def _status(state: Mapping[str, Any], stop: int) -> str:
         f"累計：{int(state.get('net_units', 0)):+d} 注（管理員手動紀錄）\n"
         f"休息門檻：{stop} 注\n"
         f"已記錄牌局：{len(state.get('history', []))} 局\n"
-        f"上次研究方向：{SIDE_LABEL.get(state.get('last_research_direction'), '尚未產生') if state.get('history') else '尚未產生'}\n"
+        f"上次研究方向：{SIDE_LABEL.get(state.get('last_research_direction'), '尚未產生')}\n"
         f"上次模擬注數：{int(state.get('last_simulation_tier', state.get('pending_tier', 0)) or 0)} 注\n"
     )
 
@@ -173,13 +163,11 @@ def _kelly_simulation(report: Mapping[str, Any], side: str) -> tuple[int, float]
     return tier, fractional
 
 
-def _display_gate(report: Mapping[str, Any], hands: int) -> dict[str, Any]:
-    """Select the unchanged candidate or SKIP using existing core diagnostics.
+def _display_direction(report: Mapping[str, Any], hands: int) -> str:
+    """Show the unchanged core candidate, regardless of research-display gates.
 
     Invalid/missing predictions are errors, never invented B/P recommendations.
-    Missing/invalid quality diagnostics fail closed to observation. No forecast,
-    core research eligibility, road signal or formal wager decision is mutated.
-    SNR is Monte Carlo separation, NOT a calibrated probability of winning.
+    This does not change research eligibility or the formal wager decision.
     """
     candidate = report.get("candidate")
     ev_b, ev_p = report.get("ev_banker"), report.get("ev_player")
@@ -189,43 +177,7 @@ def _display_gate(report: Mapping[str, Any], hands: int) -> dict[str, Any]:
                        for value in (ev_b, ev_p))
             or candidate != ("B" if ev_b >= ev_p else "P")):
         raise RuntimeError("模型結果缺失或不一致，本次未產生預測")
-    view = report.get("research_view") or {}
-    metrics = {key: view.get(key) for key in (
-        "abs_ev_gap", "ev_gap_se", "ev_gap_snr", "ess_ratio", "ancestor_diversity",
-    )}
-    reasons = []
-    gate = DISPLAY_GATE_THRESHOLDS
-    if hands < gate["MIN_DIRECTION_ROUNDS"]:
-        reasons.append("insufficient_rounds")
-    valid = all(type(value) in (int, float) and math.isfinite(value) and value >= 0
-                for value in metrics.values())
-    if not valid:
-        reasons.append("invalid_gate_metrics")
-    elif (metrics["ess_ratio"] > 1 or metrics["ancestor_diversity"] > 1
-          or not math.isclose(metrics["abs_ev_gap"], abs(ev_b - ev_p),
-                              rel_tol=1e-6, abs_tol=1e-12)
-          or (metrics["ev_gap_se"] > 0 and not math.isclose(
-              metrics["ev_gap_snr"], metrics["abs_ev_gap"] / metrics["ev_gap_se"],
-              rel_tol=1e-6, abs_tol=1e-12))):
-        reasons.append("inconsistent_gate_metrics")
-    else:
-        if metrics["abs_ev_gap"] < gate["MIN_DIRECTION_EV_GAP"]:
-            reasons.append("weak_ev_separation")
-        if not 0 < metrics["ev_gap_se"] <= gate["MAX_DIRECTION_GAP_SE"]:
-            reasons.append("high_estimator_uncertainty")
-        if metrics["ev_gap_snr"] < gate["MIN_DIRECTION_GAP_SNR"]:
-            reasons.append("low_gap_to_noise")
-        if metrics["ess_ratio"] < gate["MIN_DIRECTION_ESS_RATIO"]:
-            reasons.append("low_particle_ess")
-        if metrics["ancestor_diversity"] < gate["MIN_DIRECTION_DIVERSITY"]:
-            reasons.append("low_particle_diversity")
-    return {"direction": "SKIP" if reasons else candidate, "eligible": not reasons,
-            "reason": reasons[0] if reasons else "balanced_display_gate_pass",
-            "reasons": reasons, "metrics": metrics}
-
-
-def _display_direction(report: Mapping[str, Any], hands: int) -> str:
-    return _display_gate(report, hands)["direction"]
+    return candidate
 
 
 def _research(history: list[str], predictor: Callable[[list[str]], Mapping[str, Any]],
@@ -236,8 +188,7 @@ def _research(history: list[str], predictor: Callable[[list[str]], Mapping[str, 
         report.get("bankroll_fraction") != 0):
         raise RuntimeError("安全鎖定：BBB 正式下注閘門與研究版本不一致")
     core_view = report.get("research_view") or {}
-    display_gate = _display_gate(report, len(history))
-    direction = display_gate["direction"]
+    direction = _display_direction(report, len(history))
     road = report.get("road_aux") or {}
     if road.get("validated_betting_edge") is not False:
         raise RuntimeError("安全鎖定：牌路不得授權正式下注")
@@ -247,9 +198,9 @@ def _research(history: list[str], predictor: Callable[[list[str]], Mapping[str, 
             or not 0 < sum(pair) <= 1.0000001):
         raise RuntimeError("模型機率資料無效，未產生固定模擬注數")
     kelly_tier, _fractional = _kelly_simulation(report, direction)
-    # Retain the prior simulated tier only when the display gate passes.
-    # SKIP must never inherit a prior tier or be promoted by the minimum floor.
-    tier = max(ALLOWED_UNITS[0], kelly_tier) if direction != "SKIP" else 0
+    # User-requested display minimum, separate from the unchanged Kelly result
+    # and formal wager gate. Every valid displayed candidate has a tier.
+    tier = max(ALLOWED_UNITS[0], kelly_tier)
     fixed_minimum = tier > kelly_tier
     # Keep core forecasts and the formal wager gate intact. The shared
     # display policy is logged separately from the original research decision.
@@ -263,20 +214,21 @@ def _research(history: list[str], predictor: Callable[[list[str]], Mapping[str, 
             "core_research_direction": core_view.get("direction", "SKIP"),
             "core_reasons": list(core_view.get("reasons") or []),
             "research_direction": direction,
-            "eligible": display_gate["eligible"],
-            "core_eligible": core_view.get("eligible") is True,
-            "display_basis": "core_candidate_with_quality_gate",
-            "reason": display_gate["reason"],
-            "reasons": display_gate["reasons"],
+            "eligible": core_view.get("eligible") is True,
+            "display_basis": "core_candidate",
+            "reason": str(core_view.get("reason") or report.get("reason") or "")[:64],
+            "reasons": list(core_view.get("reasons") or []),
             # All metrics are the original core estimates.
-            "gate_metrics": display_gate["metrics"],
-            "gate_thresholds": dict(DISPLAY_GATE_THRESHOLDS),
+            "gate_metrics": {key: core_view.get(key) for key in (
+                "abs_ev_gap", "ev_gap_se", "ev_gap_snr", "ess_ratio",
+                "ancestor_diversity",
+            )},
+            "gate_thresholds": {},
             "core_gate_thresholds": {key: (report.get("config") or {}).get(key)
                                      for key in GATE_KEYS},
             "kelly_tier": kelly_tier,
             "display_tier": tier,
-            "tier_basis": "observe" if direction == "SKIP" else (
-                "fixed_minimum" if fixed_minimum else "kelly"),
+            "tier_basis": "fixed_minimum" if fixed_minimum else "kelly",
         }, ensure_ascii=False, separators=(",", ":")), flush=True)
     direction_label = SIDE_LABEL[direction]
     unit_label = "模擬，固定最低級距" if fixed_minimum else "模擬"

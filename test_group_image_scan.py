@@ -106,11 +106,11 @@ class GroupOCRTests(unittest.TestCase):
         self.assertIsNone(self.claim(self.image()))
         self.assertEqual(self.state()["history"], [])
 
-    def test_real_engine_observation_matches_text_and_clears_previous_image_tier(self):
+    def test_real_engine_image_and_text_always_show_same_candidate(self):
         from bbb_soft_shoe_runtime import analyze_history
         from group_text_research import _research
         self.start()
-        for raw, wanted_tier in (("BBB", 5), ("BBBBBBBB", 0)):
+        for raw, wanted_tier in (("BBB", 5), ("BBBBBBBB", 5)):
             history = list(raw)
             reply = finish_image(self.claim(self.image()), self.screen(history),
                                  environ=self.env, state_path=self.path,
