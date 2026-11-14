@@ -1,9 +1,9 @@
-"""Opt-in, UID-gated LINE group text interface for unchanged BBB Soft Shoe.
+"""Opt-in, UID-gated LINE text interface for BBB Soft Shoe observations.
 
 This is a research-only simulation ledger. No wagers are made or authorized.
 Group transport requires BOTH group and admin allowlists. The shared research
 reply also serves private points behind the original membership guard; it never
-changes the BBB engine or the separate private OCR/LIFF flow.
+changes the formal betting gates or the separate private OCR/LIFF flow.
 """
 from __future__ import annotations
 
@@ -18,7 +18,9 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from bbb_soft_shoe_runtime import MAX_HANDS, SOURCE_COMMIT, VERSION, analyze_history
+from bbb_soft_shoe_runtime import (
+    MAX_HANDS, SOURCE_COMMIT, VERSION, SCORE_VERSION, analyze_history, validate_scores,
+)
 import prediction_audit as audit
 
 _LOCK = threading.RLock()
@@ -51,7 +53,7 @@ def parse_group_scores(value: str) -> list[dict[str, int]] | None:
     """Final totals only; preserve the existing Player-then-Banker convention.
 
     Pure parsing: never import personal sessions or the independent-score model.
-    Each parsed pair becomes one B/P/T observation for the unchanged Soft Shoe.
+    Preserve both totals; callers also derive B/P/T for roads and accounting.
     """
     text = unicodedata.normalize("NFKC", str(value or "")).strip()
     chunks = [part.strip() for part in re.split(r"[\n;；]+", text) if part.strip()]
@@ -70,6 +72,19 @@ def parse_group_scores(value: str) -> list[dict[str, int]] | None:
         player, banker = (right, left) if bp else (left, right)
         pairs.append({"player": player, "banker": banker})
     return pairs
+
+
+def scores_for_history(history, records):
+    """Align existing sparse hand-numbered records without inventing old totals."""
+    aligned = [None] * len(history)
+    for record in records:
+        if not isinstance(record, dict):
+            raise ValueError("invalid_score_record")
+        hand = record.get("hand")
+        if type(hand) is not int or not 1 <= hand <= len(history) or aligned[hand - 1] is not None:
+            raise ValueError("invalid_or_duplicate_score_hand")
+        aligned[hand - 1] = {"player": record.get("player"), "banker": record.get("banker")}
+    return validate_scores(history, aligned)
 
 
 def _allowed(raw: str) -> set[str]:
@@ -233,10 +248,15 @@ def _display_direction(report: Mapping[str, Any], hands: int) -> str:
     return _display_policy(report, hands)["direction"]
 
 
-def _research(history: list[str], predictor: Callable[[list[str]], Mapping[str, Any]],
-              *, capture: dict | None = None) -> tuple[str, int, str]:
-    report = predictor(history)
-    if (report.get("version") != VERSION or report.get("action") != "Skip" or
+def _research(history: list[str], predictor: Callable[..., Mapping[str, Any]],
+              *, capture: dict | None = None, scores=None) -> tuple[str, int, str]:
+    checked = validate_scores(history, scores) if scores is not None else None
+    uses_scores = checked is not None and any(pair is not None for pair in checked)
+    report = predictor(history, scores=checked) if uses_scores else predictor(history)
+    # Known totals must reach the conditioned engine, never silently downgrade
+    # to an otherwise valid B/P/T-only report.
+    expected_version = SCORE_VERSION if uses_scores else VERSION
+    if (report.get("version") != expected_version or report.get("action") != "Skip" or
         report.get("validated_edge") is not False or
         report.get("bankroll_fraction") != 0):
         raise RuntimeError("安全鎖定：BBB 正式下注閘門與研究版本不一致")
@@ -313,7 +333,7 @@ def _record_audit(state, group_id, event_id, report, source, path, env):
 def handle_group_event(
     event: Mapping[str, Any], *,
     environ: Mapping[str, str] | None = None,
-    predictor: Callable[[list[str]], Mapping[str, Any]] | None = None,
+    predictor: Callable[..., Mapping[str, Any]] | None = None,
     state_path: Path | None = None,
 ) -> str | None:
     """Return a text reply for authorized group instructions, else None.
@@ -432,16 +452,18 @@ def handle_group_event(
                 return "本次輸入會超過 72 局上限，整則訊息未記錄；請結束本場，重新開始分析。"
             previous_hands = len(history)
             history.extend(outcomes)
+            score_records = list(state.get("score_records") or [])
+            if scores is not None:
+                score_records.extend({"hand": previous_hands + index + 1, **pair}
+                                     for index, pair in enumerate(scores))
             # Compute before committing the new history: any model failure
             # leaves the state unchanged, with no fabricated prediction.
             audit_snapshot = {}
             direction, tier, analysis = _research(
-                history, analyze_history if predictor is None else predictor, capture=audit_snapshot)
+                history, analyze_history if predictor is None else predictor, capture=audit_snapshot,
+                scores=scores_for_history(history, score_records))
             state["history"] = history
-            if scores is not None:
-                state.setdefault("score_records", []).extend(
-                    {"hand": previous_hands + index + 1, **pair}
-                    for index, pair in enumerate(scores))
+            state["score_records"] = score_records
             state["last_research_direction"] = direction
             state["last_simulation_tier"] = tier
             state["pending_tier"] = tier

@@ -7,10 +7,11 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from types import ModuleType
+from unittest.mock import Mock, patch
 
 from group_image_scan import reserve_image, finish_image, scan_and_reply_group
-from group_text_research import VERSION, handle_group_event
+from group_text_research import VERSION, SCORE_VERSION, handle_group_event
 
 
 class GroupOCRTests(unittest.TestCase):
@@ -45,10 +46,11 @@ class GroupOCRTests(unittest.TestCase):
     def claim(self, event):
         return reserve_image(event, environ=self.env, state_path=self.path)
 
-    def model(self, history):
+    def model(self, history, *, scores=None):
         self.predicted.append(list(history))
         return {
-            "version": VERSION, "action": "Skip",
+            "version": SCORE_VERSION if scores and any(p is not None for p in scores) else VERSION,
+            "action": "Skip",
             "validated_edge": False, "bankroll_fraction": 0,
             "observations": len(history), "candidate": "B",
             "ev_banker": -.004, "ev_player": -.02,
@@ -84,11 +86,25 @@ class GroupOCRTests(unittest.TestCase):
         handle_group_event(self.event("38"), environ=self.env, state_path=self.path, predictor=self.model)
         path, scope = audit.database_path(self.path), audit.scope_key("group", "C-good")
         stats = audit.summarize(path, scope)
-        self.assertEqual((stats["cohorts"][0]["forecasts"], stats["cohorts"][0]["wins"]), (2, 1))
+        self.assertEqual((sum(c["forecasts"] for c in stats["cohorts"]),
+                          sum(c["wins"] for c in stats["cohorts"])), (2, 1))
+        self.assertEqual({c["version"] for c in stats["cohorts"]}, {VERSION, SCORE_VERSION})
         stale = self.claim(self.image())
         self.start()
         self.done(stale, self.screen(["B", "P", "T", "B", "P"]))
         self.assertEqual(audit.summarize(path, scope), stats)
+
+    def test_ocr_extension_keeps_existing_totals_and_unknown_slots(self):
+        self.start()
+        self.done(self.claim(self.image()), self.screen(["B", "T"]))
+        handle_group_event(self.event("84"), environ=self.env, state_path=self.path, predictor=self.model)
+        claim = self.claim(self.image())
+        with patch("group_text_research.analyze_history", side_effect=self.model) as model:
+            finish_image(claim, self.screen(list("BTPBT")), environ=self.env, state_path=self.path)
+            model.assert_called_once_with(list("BTPBT"), scores=[
+                None, None, {"player": 8, "banker": 4}, None, None])
+        self.assertEqual(self.state()["score_records"], [{"hand": 3, "player": 8, "banker": 4}])
+        self.assertEqual(self.state()["history"], list("BTPBT"))
 
     def test_authorization_and_active_session_before_download(self):
         self.assertIsNone(self.claim(self.image(uid="U-outsider")))
@@ -189,8 +205,8 @@ class GroupOCRTests(unittest.TestCase):
     def test_wrong_wager_gate_is_rejected_and_not_persisted(self):
         self.start()
         claim = self.claim(self.image())
-        def unsafe(hist):
-            r = self.model(hist)
+        def unsafe(hist, *, scores=None):
+            r = self.model(hist, scores=scores)
             r["action"] = "B"
             return r
         with self.assertRaisesRegex(RuntimeError, "安全鎖定"):
@@ -242,8 +258,11 @@ class GroupOCRTests(unittest.TestCase):
         path = Path(self.directory.name) / "dummy.png"
         path.write_bytes(b"x")
         fake = FakeApp(path)
-        with patch("screen_pipeline.analyze_game_screen",
-                   return_value=self.screen(["B", "P"])):
+        # This routing test supplies OCR output; importing the real image
+        # stack would unnecessarily require OpenCV despite mocking analysis.
+        pipeline = ModuleType("screen_pipeline")
+        pipeline.analyze_game_screen = Mock(return_value=self.screen(["B", "P"]))
+        with patch.dict("sys.modules", {"screen_pipeline": pipeline}):
             with patch("group_image_scan.finish_image",
                        return_value="這是群組 OCR 預測結果") as finish:
                 asyncio.run(scan_and_reply_group(fake, claim))
@@ -253,9 +272,10 @@ class GroupOCRTests(unittest.TestCase):
         self.assertIn("群組 OCR", fake.sent[0][1][0]["text"])
         self.assertIn("quickReply", fake.sent[0][1][0])
         self.assertLessEqual(len(fake.sent[0][1][0]["quickReply"]["items"]), 13)
+        pipeline.analyze_game_screen.assert_called_once()
         finish.assert_called_once()
 
-    def test_real_manual_and_screenshot_histories_have_identical_next_forecast(self):
+    def test_real_bpt_only_manual_and_screenshot_histories_have_identical_next_forecast(self):
         self.env["GROUP_ALLOWED_IDS"] = "C-good,C-manual"
         for history in (list("BBB"), list("BBBBBBBB"),
                         list("BPBPBBBBBBBBPPPPPTTPPPBP")):
@@ -268,7 +288,7 @@ class GroupOCRTests(unittest.TestCase):
                                    environ=self.env, state_path=self.path)
                 for outcome in history:
                     manual_result = handle_group_event(
-                        self.event({"B": "19", "P": "91", "T": "55"}[outcome], group="C-manual"),
+                        self.event({"B": "莊", "P": "閒", "T": "和"}[outcome], group="C-manual"),
                         environ=self.env, state_path=self.path)
                 self.assertEqual(manual_result, image_result)
                 self.assertIn("建議注數：", manual_result)

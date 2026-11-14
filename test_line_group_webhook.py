@@ -166,7 +166,7 @@ class WebhookRouteTests(unittest.TestCase):
         self.assertEqual(self.stub.visits, [])
 
     def test_reply_failure_does_not_lose_or_duplicate_manual_hand(self):
-        from bbb_soft_shoe_runtime import VERSION
+        from bbb_soft_shoe_runtime import SCORE_VERSION
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
             "GROUP_STATE_FILE": str(Path(directory) / "group.json"),
             "GROUP_TEXT_ENABLED": "1", "GROUP_ADMIN_UID": "U-admin",
@@ -175,7 +175,7 @@ class WebhookRouteTests(unittest.TestCase):
         }):
             source = {"type": "group", "groupId": "C-good", "userId": "U-admin"}
             self.post([self.event(source, "start", "開始分析")])
-            report = {"version": VERSION, "action": "Skip", "validated_edge": False,
+            report = {"version": SCORE_VERSION, "action": "Skip", "validated_edge": False,
                       "bankroll_fraction": 0, "probabilities": {"B": .51, "P": .48, "T": .01},
                       "observations": 1, "candidate": "B", "ev_banker": .0045, "ev_player": -.03,
                       "research_view": {"direction": "B", "eligible": True,
@@ -187,7 +187,7 @@ class WebhookRouteTests(unittest.TestCase):
                     patch.object(self.stub, "_reply", return_value=False):
                 self.assertEqual(self.post([result]).status_code, 200)
                 self.assertEqual(self.post([result]).status_code, 200)
-            model.assert_called_once_with(["B"])
+            model.assert_called_once_with(["B"], scores=[{"player": 3, "banker": 5}])
             self.assertEqual(len(self.stub.pushes), 1)
             self.assertEqual(self.stub.pushes[0][0], "C-good")
             self.assertIn("第 2 局", self.stub.pushes[0][1][0]["text"])

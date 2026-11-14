@@ -1,4 +1,4 @@
-"""Private LINE final totals using the unchanged group Soft Shoe calculation.
+"""Private LINE final totals using the shared score-conditioned Soft Shoe path.
 
 Only signed user events may reach this adapter. Membership uses the original
 app guard; sessions stay in the existing UID store, never group state.
@@ -194,12 +194,16 @@ def _evaluate(legacy, uid, event_id, pairs, outcome):
         history = before + outcomes
         if len(history) > group.MAX_HANDS:
             raise ValueError("本次輸入會超過 72 局上限，整則訊息未記錄；請重新開始分析。")
+        scores = list(current.get("private_points_scores") or [])
+        if pairs is not None:
+            scores.extend({"hand": len(before) + i + 1, **p} for i, p in enumerate(pairs))
+        observations = group.scores_for_history(history, scores)
         _loading(legacy, uid)
         if not legacy._PREDICTION_SLOTS.acquire(timeout=5):
             raise TimeoutError("目前分析人數較多，請稍後再試。")
         try:
             report = {}
-            direction, tier, text = group._research(history, group.analyze_history, capture=report)
+            direction, tier, text = group._research(history, group.analyze_history, capture=report, scores=observations)
             panel = ui.result_panel(report, direction, tier, len(history) + 1, run_id)
         finally:
             legacy._PREDICTION_SLOTS.release()
@@ -214,9 +218,6 @@ def _evaluate(legacy, uid, event_id, pairs, outcome):
                 raise RuntimeError("本次分析已結束、重新開始或已更新，舊點數未寫入。")
             if event_id in (session.get("private_points_processed") or []):
                 return []
-            scores = list(session.get("private_points_scores") or [])
-            if pairs is not None:
-                scores.extend({"hand": len(before) + i + 1, **p} for i, p in enumerate(pairs))
             session.update(storage._road_state_from_raw(history))
             session.update({"private_points_scores": scores, "private_points_text": text,
                             "point_score_audit": [{"player": p["player"], "banker": p["banker"]} for p in scores],
@@ -224,7 +225,7 @@ def _evaluate(legacy, uid, event_id, pairs, outcome):
                             "screen_data_version": version + 1, "screen_prediction_version": version + 1,
                             "screen_last_input_source": "private_final_scores" if pairs is not None else "private_bpt",
                             "screen_last_analyzed_at": storage._now(), "status": "點數分析中",
-                            "screen_last_prediction": {"engine": group.VERSION,
+                            "screen_last_prediction": {"engine": report["version"],
                                 "bbb_soft_shoe": {"active": True, "report": copy.deepcopy(report),
                                     "display_direction": direction, "source_commit": group.SOURCE_COMMIT},
                                 "action": direction, "direction": direction, "formal_action": "Skip",

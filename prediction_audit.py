@@ -101,6 +101,7 @@ def record_history(*, path: Path, scope: str, shoe: str, event_key: str,
     evidence = {key: report.get(key) for key in (
         "candidate", "ev_banker", "ev_player", "research_view", "features48",
         "feature_schema", "config", "model", "particle_ess", "ancestor_diversity",
+        "observation_model", "observation_summary",
     )}
     score_map = {int(pair["hand"]): pair for pair in scores}
     for hand, pair in score_map.items():

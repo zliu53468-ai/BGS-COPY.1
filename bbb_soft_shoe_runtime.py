@@ -1,9 +1,8 @@
-"""Bounded BBB Soft Shoe adapter with a COPY-specific sampling profile.
+"""Bounded BBB Soft Shoe adapter with optional aligned final-total observations.
 
-The imported BBB JavaScript engine and model bundle are immutable, matched to
-the web release by their Git blob SHAs. This adapter keeps all LINE UIDs out of
-the JS engine: the full current shoe's B/P/T history is passed per request.
-Worker options set 512/96/192; upstream defaults and engine rules stay untouched.
+COPY adds a posterior hook to the original core; other upstream sources stay
+locked. Both local source hashes are verified. LINE UIDs never seed the model.
+Worker options remain 512/96/192; absent totals keep the original B/P/T path.
 """
 from __future__ import annotations
 
@@ -19,38 +18,66 @@ ROOT = Path(__file__).resolve().parent
 ENGINE = ROOT / "bbb_engine"
 SOURCE_COMMIT = "ce34c8be77df4fc5922a59454daf3dc22d1a1898"
 SOURCE_BLOBS = {
-    "soft_shoe_decision_runtime.js": "13ee5a6f829d451b4c156935a9401680a705311b",
+    "soft_shoe_decision_runtime.js": "4c24da8aebb51ffce0826352ea372afdf09a9c71",
     "derived_road_aux.js": "947914689d609414ca787cf7bd8710669e09ef12",
     "soft_shoe_model_bundle.js": "59afcff8391ba26d2f4bcc6bbc5f868cb7de9120",
     "soft_shoe_frozen_lstm_runtime.js": "032c53395d7c285b0dfeb915a5317b6a564416b7",
     "soft_shoe_frozen_model_bundle.js": "68728cc22c5c3780432827de33e737e7cfcd8343",
 }
 VERSION = "BBB_SOFT_SHOE_BPT_EV_V5_1"
+SCORE_VERSION = "BBB_SOFT_SHOE_TOTALS_EV_V1"
+OBSERVATION_MODEL = "final_totals_importance_v1"
+UPSTREAM_CORE_BLOB = "13ee5a6f829d451b4c156935a9401680a705311b"
+COPY_SOURCE_BLOBS = {"soft_shoe_score_observation.cjs": "59cab331bcae0cca7be7aaa0aaec04d673ec11c6"}
 MODEL_PARAMETERS = {"PARTICLE_COUNT": 512, "LIKELIHOOD_DRAWS": 96, "NEXT_HAND_DRAWS": 192}
 MAX_HANDS = 72
 TIMEOUT_SECONDS = 8.0
 
 
 def verify_source() -> None:
-    for name, expected in SOURCE_BLOBS.items():
+    for name, expected in {**SOURCE_BLOBS, **COPY_SOURCE_BLOBS}.items():
         data = (ENGINE / name).read_bytes()
         got = sha1(b"blob " + str(len(data)).encode("ascii") + b"\0" + data).hexdigest()
         if got != expected:
             raise RuntimeError(f"BBB Soft Shoe source blob mismatch: {name}")
 
 
-def analyze_history(history: Iterable[str]) -> dict[str, Any]:
+def validate_scores(history: list[str], scores) -> list[dict[str, int] | None]:
+    """One slot per hand, None for genuinely unknown totals; no coercion."""
+    if not isinstance(scores, list) or len(scores) != len(history):
+        raise ValueError("scores_history_length_mismatch")
+    result = []
+    for outcome, pair in zip(history, scores):
+        if pair is None:
+            result.append(None)
+            continue
+        if (not isinstance(pair, dict) or set(pair) != {"player", "banker"}
+                or any(type(pair[k]) is not int or not 0 <= pair[k] <= 9 for k in pair)):
+            raise ValueError("invalid_final_totals")
+        actual = "P" if pair["player"] > pair["banker"] else "B" if pair["banker"] > pair["player"] else "T"
+        if outcome != actual:
+            raise ValueError("scores_outcome_mismatch")
+        result.append(dict(pair))
+    return result
+
+
+def analyze_history(history: Iterable[str], *, scores=None) -> dict[str, Any]:
     seq = [str(v).upper().strip() for v in history]
     if any(x not in {"B", "P", "T"} for x in seq):
         raise ValueError("invalid_bpt_history")
     # No silent truncation: doing so would invent a new shoe at its middle.
     if len(seq) > MAX_HANDS:
         raise ValueError("本靴已超過 72 局，超出目前 BBB 模型深度上限；請換新靴再開始分析。")
+    checked = validate_scores(seq, scores) if scores is not None else None
+    known = sum(pair is not None for pair in checked) if checked is not None else 0
+    payload = {"history": seq}
+    if checked is not None:
+        payload["scores"] = checked
     verify_source()
     try:
         completed = subprocess.run(
             _node_command() + [str(ENGINE / "worker_soft_shoe.cjs")],
-            input=json.dumps({"history": seq}, separators=(",", ":"), allow_nan=False),
+            input=json.dumps(payload, separators=(",", ":"), allow_nan=False),
             capture_output=True, text=True, encoding="utf-8", timeout=TIMEOUT_SECONDS,
             cwd=str(ROOT), check=False,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
@@ -69,8 +96,13 @@ def analyze_history(history: Iterable[str]) -> dict[str, Any]:
     if result.get("source_commit") != SOURCE_COMMIT or result.get("source_blob") != SOURCE_BLOBS["soft_shoe_decision_runtime.js"]:
         raise RuntimeError("BBB Soft Shoe worker source mismatch")
     report = result.get("report") or {}
-    if report.get("version") != VERSION or report.get("observations") != len(seq):
+    if report.get("version") != (SCORE_VERSION if known else VERSION) or report.get("observations") != len(seq):
         raise RuntimeError("BBB Soft Shoe observation/version mismatch")
+    if known and (result.get("observation_source_blob") != COPY_SOURCE_BLOBS["soft_shoe_score_observation.cjs"] or
+                  report.get("observation_model") != OBSERVATION_MODEL or
+                  report.get("observation_summary") != {"total_hands": len(seq), "score_hands": known,
+                                                       "bpt_only_hands": len(seq) - known}):
+        raise RuntimeError("BBB final-total observation contract mismatch")
     if any((report.get("config") or {}).get(key) != value for key, value in MODEL_PARAMETERS.items()):
         raise RuntimeError("BBB Soft Shoe N/L/M configuration mismatch")
     if report.get("action") != "Skip" or report.get("bankroll_fraction") != 0 or report.get("validated_edge") is not False:

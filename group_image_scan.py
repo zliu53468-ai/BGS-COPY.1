@@ -1,4 +1,4 @@
-"""Authorized LINE group image -> existing OCR -> unchanged BBB Soft Shoe.
+"""Authorized LINE group image -> existing OCR -> shared BBB Soft Shoe path.
 
 Group images never pass into personal UID sessions or money-management code.
 All group results are delivered to the groupId, never the sender userId.
@@ -132,11 +132,12 @@ def finish_image(
             )
         if len(history) == len(old):
             return f"📷 已辨識完整牌路 {len(history)} 局，與現有紀錄相同；未重複新增。"
-        # Existing BBB analyze_history applies unchanged, with formal Skip
-        # and no bankroll input. Compute before mutating the group ledger.
+        # Preserve any earlier manual totals; OCR-only new hands stay unknown.
+        # Formal Skip and no bankroll input. Compute before mutating the ledger.
         audit_snapshot = {}
         direction, tier, report_text = group._research(
-            history, group.analyze_history if predictor is None else predictor, capture=audit_snapshot)
+            history, group.analyze_history if predictor is None else predictor, capture=audit_snapshot,
+            scores=group.scores_for_history(history, state.get("score_records") or []))
         # asyncio.to_thread may continue after wait_for times out. Never
         # commit stale OCR to disk after a timeout/cancellation.
         if cancel_event is not None and cancel_event.is_set():

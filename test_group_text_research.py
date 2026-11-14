@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from group_text_research import (
-    VERSION, _display_direction, _kelly_simulation, parse_group_scores,
+    VERSION, SCORE_VERSION, _display_direction, _kelly_simulation, parse_group_scores,
     _research, handle_group_event, _display_policy, DISPLAY_GATE_THRESHOLDS,
 )
 
@@ -46,10 +46,11 @@ class GroupTextResearchTests(unittest.TestCase):
                         "text": text},
         }
 
-    def predictor(self, history):
+    def predictor(self, history, *, scores=None):
         self.histories.append(list(history))
         return {
-            "version": VERSION, "action": "Skip",
+            "version": SCORE_VERSION if scores and any(p is not None for p in scores) else VERSION,
+            "action": "Skip",
             "validated_edge": False, "bankroll_fraction": 0,
             "observations": len(history), "candidate": "B",
             "ev_banker": -.004, "ev_player": -.02,
@@ -198,8 +199,8 @@ class GroupTextResearchTests(unittest.TestCase):
         self.call("開始分析")
         self.call("紅")
         self.assertEqual(self.state()["pending_tier"], 5)
-        def weak(history):
-            report = self.predictor(history)
+        def weak(history, *, scores=None):
+            report = self.predictor(history, scores=scores)
             report["research_view"]["ess_ratio"] = .29
             return report
         reply = handle_group_event(self.event("藍"), environ=self.env,
@@ -208,8 +209,8 @@ class GroupTextResearchTests(unittest.TestCase):
         self.assertIn("建議注數：0 注", reply)
         self.assertEqual(self.state()["pending_tier"], 0)
         self.assertIn("沒有待結算", self.call("+"))
-        def strong(history):
-            report = self.predictor(history)
+        def strong(history, *, scores=None):
+            report = self.predictor(history, scores=scores)
             report.update(probabilities={"B": .51, "P": .48, "T": .01},
                           ev_banker=.0045, ev_player=-.03)
             report["research_view"].update(abs_ev_gap=.0345, ev_gap_se=.01, ev_gap_snr=3.45)
@@ -226,8 +227,8 @@ class GroupTextResearchTests(unittest.TestCase):
         self.assertIsNone(self.call("隨便聊天"))
         self.assertEqual(self.state()["history"], [])
 
-        def unsafe(history):
-            result = self.predictor(history)
+        def unsafe(history, *, scores=None):
+            result = self.predictor(history, scores=scores)
             result["action"] = "B"
             return result
 
@@ -240,8 +241,8 @@ class GroupTextResearchTests(unittest.TestCase):
     def test_research_b_direction_displays_when_eligible_false(self):
         # Match private Soft Shoe display: direction B/P is independent of
         # research eligible, while the official betting gate remains locked.
-        def b_direction(history):
-            report = self.predictor(history)
+        def b_direction(history, *, scores=None):
+            report = self.predictor(history, scores=scores)
             report["research_view"]["eligible"] = False
             return report
 
@@ -254,8 +255,8 @@ class GroupTextResearchTests(unittest.TestCase):
         self.assertEqual(self.state()["last_research_direction"], "B")
 
     def test_research_skip_shows_original_candidate_when_not_eligible(self):
-        def skip_direction(history):
-            report = self.predictor(history)
+        def skip_direction(history, *, scores=None):
+            report = self.predictor(history, scores=scores)
             report["research_view"]["eligible"] = False
             report["research_view"]["direction"] = "SKIP"
             return report
@@ -332,8 +333,8 @@ class GroupTextResearchTests(unittest.TestCase):
         self.assertTrue(self.state()["active"])
 
     def test_bp_direction_gets_explicit_fixed_minimum_when_kelly_is_zero(self):
-        def low_tier(hist):
-            report = self.predictor(hist)
+        def low_tier(hist, *, scores=None):
+            report = self.predictor(hist, scores=scores)
             report["probabilities"] = {"B": .51, "P": .48, "T": .01}
             return report
         self.call("開始分析")
@@ -370,7 +371,7 @@ class GroupTextResearchTests(unittest.TestCase):
             with self.subTest(probabilities=probabilities), \
                     self.assertRaisesRegex(RuntimeError, "模型機率資料無效"):
                 handle_group_event(self.event("莊"), environ=self.env,
-                                   state_path=self.path, predictor=lambda _: report)
+                                   state_path=self.path, predictor=lambda _, **kw: report)
             self.assertEqual(self.state()["history"], [])
             self.assertEqual(self.state()["pending_tier"], 0)
 
@@ -387,8 +388,8 @@ class GroupTextResearchTests(unittest.TestCase):
         self.assertEqual(self.state()["history"], list("BBB"))
 
     def test_research_skip_reasons_do_not_hide_valid_candidate(self):
-        def uncertain(hist):
-            report = self.predictor(hist)
+        def uncertain(hist, *, scores=None):
+            report = self.predictor(hist, scores=scores)
             report["research_view"].update({
                 "direction": "SKIP",
                 "eligible": False,
@@ -419,7 +420,7 @@ class GroupTextResearchTests(unittest.TestCase):
             with self.subTest(history_len=len(history)):
                 report = analyze_history(history)
                 adapter = predict_screen(history)
-                direction, tier, message = _research(history, lambda _: report)
+                direction, tier, message = _research(history, lambda _, **kw: report)
                 self.assertIn(direction, (report["candidate"], "SKIP"))
                 self.assertEqual(tier == 0, direction == "SKIP")
                 self.assertEqual(report["research_view"], adapter["research_view"])
@@ -518,18 +519,45 @@ class GroupTextResearchTests(unittest.TestCase):
         before = self.path.read_bytes()
         with self.assertRaises(TimeoutError):
             handle_group_event(self.event("84"), environ=self.env, state_path=self.path,
-                               predictor=lambda _: (_ for _ in ()).throw(TimeoutError()))
+                               predictor=lambda _, **kw: (_ for _ in ()).throw(TimeoutError()))
         self.assertEqual(self.path.read_bytes(), before)
 
-    def test_total_score_input_matches_unchanged_soft_shoe_history(self):
+    def test_score_input_rejects_silent_bpt_downgrade_without_committing(self):
+        self.call("開始分析")
+        before = self.path.read_bytes()
+        # A predictor accepting the new argument but ignoring it must not pass
+        # the interface contract merely because its betting gates are safe.
+        with self.assertRaises(RuntimeError):
+            handle_group_event(self.event("84"), environ=self.env, state_path=self.path,
+                               predictor=lambda history, **kw: self.predictor(history))
+        self.assertEqual(self.path.read_bytes(), before)
+        report = self.predictor(["P"], scores=[{"player": 8, "banker": 4}])
+        with self.assertRaises(RuntimeError):
+            _research(["P"], lambda history: report)
+
+    def test_invalid_existing_score_alignment_fails_without_partial_write(self):
+        self.call("開始分析")
+        self.call("84")
+        data = json.loads(self.path.read_text())
+        state = data["groups"]["C-group-1"]
+        state["score_records"].append(dict(state["score_records"][0]))
+        self.path.write_text(json.dumps(data))
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "duplicate_score_hand"):
+            self.call("99")
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_total_score_input_matches_conditioned_soft_shoe_history(self):
         from bbb_soft_shoe_runtime import analyze_history, verify_source
         verify_source()
         self.call("開始分析")
         result = handle_group_event(self.event("84\n19\n66"), environ=self.env,
                                     state_path=self.path)
-        report = analyze_history(list("PBT"))
-        self.assertEqual(result, _research(list("PBT"), lambda _: report)[2])
-        self.assertEqual(self.state()["last_research_direction"], report["candidate"])
+        scores = [{"player": 8, "banker": 4}, {"player": 1, "banker": 9}, {"player": 6, "banker": 6}]
+        report = analyze_history(list("PBT"), scores=scores)
+        expected = _research(list("PBT"), lambda _, **kw: report, scores=scores)
+        self.assertEqual(result, expected[2])
+        self.assertEqual(self.state()["last_research_direction"], expected[0])
         self.assertNotIn("觀望", result)
         self.assertEqual(report["action"], "Skip")
 
@@ -545,7 +573,7 @@ class GroupTextResearchTests(unittest.TestCase):
                 with patch.dict(os.environ, {"GROUP_RESEARCH_GATE_LOG": "0"}):
                     quiet = io.StringIO()
                     with redirect_stdout(quiet):
-                        expected = _research(history, lambda _: report)
+                        expected = _research(history, lambda _, **kw: report)
                 self.assertEqual(quiet.getvalue(), "")
                 output = io.StringIO()
                 with patch.dict(os.environ, {
@@ -554,7 +582,7 @@ class GroupTextResearchTests(unittest.TestCase):
                     "LINE_CHANNEL_ACCESS_TOKEN": "do-not-log-token",
                     "GROUP_ADMIN_UID": "do-not-log-uid",
                 }), redirect_stdout(output):
-                    actual = _research(history, lambda _: report)
+                    actual = _research(history, lambda _, **kw: report)
                 self.assertEqual(actual, expected)
                 self.assertEqual(report, original)
                 self.assertEqual(len(actual[2].splitlines()), 3)
@@ -591,7 +619,7 @@ class GroupCandidateTests(unittest.TestCase):
                 history = list(raw)
                 report = analyze_history(history)
                 original = copy.deepcopy(report)
-                direction, tier, message = _research(history, lambda _: report)
+                direction, tier, message = _research(history, lambda _, **kw: report)
                 self.assertIn(direction, (report["candidate"], "SKIP"))
                 self.assertIn(tier, (0, 5, 10))
                 self.assertEqual(tier == 0, direction == "SKIP")

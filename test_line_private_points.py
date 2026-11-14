@@ -134,8 +134,9 @@ class PrivatePointsTests(unittest.TestCase):
     def session(self, uid="U-one"):
         return store.get_session(uid)
 
-    def fake_model(self, history):
-        return {"version": group.VERSION, "action": "Skip", "validated_edge": False,
+    def fake_model(self, history, *, scores=None):
+        return {"version": group.SCORE_VERSION if scores and any(p is not None for p in scores) else group.VERSION,
+                "action": "Skip", "validated_edge": False,
                 "bankroll_fraction": 0, "observations": len(history), "candidate": "B",
                 "probabilities": {"B": .51, "P": .48, "T": .01},
                 "ev_banker": .0045, "ev_player": -.03,
@@ -206,8 +207,8 @@ class PrivatePointsTests(unittest.TestCase):
 
     def test_private_5_10_watch_one_clear_previous_units_without_resetting_history(self):
         self.start()
-        def grade(history):
-            report = self.fake_model(history)
+        def grade(history, *, scores=None):
+            report = self.fake_model(history, scores=scores)
             if len(history) == 2:
                 report["research_view"].update(ev_gap_se=.01, ev_gap_snr=3.45)
             elif len(history) == 3:
@@ -229,13 +230,14 @@ class PrivatePointsTests(unittest.TestCase):
         self.start()
         for pair, expected in (("84", "P"), ("莊7閒2", "PB"), ("９９", "PBT")):
             actual = self.call(pair)[0]
-            direction, tier, wanted = group._research(list(expected), group.analyze_history)
+            observations = group.scores_for_history(list(expected), self.session()["private_points_scores"])
+            direction, tier, wanted = group._research(list(expected), group.analyze_history, scores=observations)
             self.assertEqual(actual["type"], "flex")
             self.assertEqual(self.session()["private_points_text"], wanted)
             self.assertNotIn("觀望", panel_text(actual))
             self.assertIn(f"建議注數：{tier} 注", panel_text(actual))
             pred = self.session()["screen_last_prediction"]
-            self.assertEqual(pred["bbb_soft_shoe"]["report"], group.analyze_history(list(expected)))
+            self.assertEqual(pred["bbb_soft_shoe"]["report"], group.analyze_history(list(expected), scores=observations))
             self.assertEqual((pred["direction"], pred["simulation_tier"]), (direction, tier))
             self.assertEqual((pred["formal_action"], pred["bet_amount"]), ("Skip", 0))
 
@@ -315,9 +317,30 @@ class PrivatePointsTests(unittest.TestCase):
         self.start()
         with patch.object(group, "analyze_history", side_effect=self.fake_model) as model:
             self.call("84\n38\n99")
-            model.assert_called_once_with(["P", "B", "T"])
+            model.assert_called_once_with(["P", "B", "T"], scores=[
+                {"player": 8, "banker": 4}, {"player": 3, "banker": 8}, {"player": 9, "banker": 9}])
         stats = audit.summarize(audit.database_path(self.path), audit.scope_key("user", "U-one"))
         self.assertEqual((stats["observations"], stats["cohorts"][0]["forecasts"], stats["cohorts"][0]["resolved"]), (3, 1, 0))
+
+    def test_mixed_old_bpt_scores_and_ties_keep_alignment_and_reset_together(self):
+        self.start()
+        with patch.object(group, "analyze_history", side_effect=self.fake_model) as model:
+            self.call("B")
+            model.assert_called_with(["B"])
+            self.call("99")
+            model.assert_called_with(["B", "T"], scores=[None, {"player": 9, "banker": 9}])
+            self.call("P")
+            self.call("19")
+            model.assert_called_with(list("BTPB"), scores=[
+                None, {"player": 9, "banker": 9}, None, {"player": 1, "banker": 9}])
+            self.assertEqual(self.session()["private_points_scores"], [
+                {"hand": 2, "player": 9, "banker": 9}, {"hand": 4, "player": 1, "banker": 9}])
+            self.assertEqual(self.session()["screen_last_prediction"]["engine"], group.SCORE_VERSION)
+            self.call("重來")
+            self.assertEqual(self.session()["private_points_scores"], [])
+            self.assertEqual(self.session()["raw_outcomes"], [])
+            self.call("84")
+            model.assert_called_with(["P"], scores=[{"player": 8, "banker": 4}])
 
     def test_always_candidate_preserves_active_session_and_separates_policy_results(self):
         self.start()
@@ -327,8 +350,8 @@ class PrivatePointsTests(unittest.TestCase):
             self.call("84\n38\n99")
         self.assertEqual(self.session()["screen_last_prediction"]["simulation_tier"], 5)
 
-        def weak(history):
-            result = self.fake_model(history)
+        def weak(history, *, scores=None):
+            result = self.fake_model(history, scores=scores)
             result["research_view"]["ess_ratio"] = .39
             return result
 
@@ -340,7 +363,9 @@ class PrivatePointsTests(unittest.TestCase):
         self.assertEqual(current["private_points_policy"], private.POLICY)
         self.assertNotIn("觀望", reply)
         self.assertEqual(current["screen_last_prediction"]["simulation_tier"], 5)
-        self.assertEqual(current["screen_last_prediction"]["bbb_soft_shoe"]["report"], weak(list("PBTB")))
+        observations = group.scores_for_history(list("PBTB"), current["private_points_scores"])
+        self.assertEqual(current["screen_last_prediction"]["bbb_soft_shoe"]["report"],
+                         weak(list("PBTB"), scores=observations))
         with patch.object(group, "analyze_history", side_effect=self.fake_model):
             self.assertIn("建議注數：5 注", panel_text(self.call("38")[0]))
         cohorts = audit.summarize(audit.database_path(self.path), audit.scope_key("user", "U-one"))["cohorts"]
@@ -379,9 +404,9 @@ class PrivatePointsTests(unittest.TestCase):
     def test_restart_or_end_during_computation_rejects_stale_result(self):
         for restart in (True, False):
             self.start()
-            def interrupt(history):
+            def interrupt(history, *, scores=None):
                 self.call("開始分析" if restart else "結束分析")
-                return self.fake_model(history)
+                return self.fake_model(history, scores=scores)
             with patch.object(group, "analyze_history", side_effect=interrupt):
                 self.assertIn("舊點數未寫入", self.call("84")[0]["text"])
             self.assertEqual(self.session()["raw_outcomes"], [])

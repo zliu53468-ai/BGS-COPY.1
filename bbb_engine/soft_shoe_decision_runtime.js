@@ -739,9 +739,13 @@
    learnFloor:cfg.ROAD_AUX_LEARN_FLOOR,learnCeil:cfg.ROAD_AUX_LEARN_CEIL,
    learnNeutral:cfg.ROAD_AUX_LEARN_NEUTRAL});
  }
- function run(history,opts={},externalModel=null,sequenceRuntime=null,sequenceModel=null){
+ function run(history,opts={},externalModel=null,sequenceRuntime=null,sequenceModel=null,observationPosterior=null){
   if(!Array.isArray(history)||history.some(x=>!isResult(x)))throw Error("invalid_bpt_history");
-  const cfg=config(opts),seed=seedFor(history),post=posterior(history,cfg,seed);
+  // COPY observation extension: forecasting/EV/gates below are unchanged.
+  if(observationPosterior!==null&&typeof observationPosterior!=="function")throw Error("invalid_observation_posterior");
+  const cfg=config(opts),post=observationPosterior===null?
+   posterior(history,cfg):observationPosterior(history,cfg);
+  const seed=post.seed;
   const road_aux=derivedRoadAux(history,cfg);
   const skip=(reason,extra={})=>({
    version:VERSION,observations:history.length,action:"Skip",direction:"SKIP",
